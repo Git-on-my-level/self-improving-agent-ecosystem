@@ -1,0 +1,36 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-ecosystems/main/schemas/policy.schema.json",
+  "schema_version": 1,
+  "default": "deny",
+  "roles": {
+    "observer": {
+      "allow": ["evidence-read", "evidence-write"],
+      "deny": ["candidate-write", "branch-push", "deploy", "credential-write"]
+    },
+    "builder": {
+      "allow": ["candidate-write", "test-execute"],
+      "deny": ["canonical-write", "branch-push", "deploy", "credential-read"]
+    },
+    "evaluator": {
+      "allow": ["candidate-read", "fixture-read", "evaluation-write"],
+      "deny": ["candidate-write", "acceptance-write", "deploy"]
+    },
+    "publisher": {
+      "allow": ["accepted-read", "branch-push", "review-request-write"],
+      "deny": ["candidate-write", "deploy", "policy-write"]
+    }
+  },
+  "human_only": [
+    "credential-change",
+    "identity-change",
+    "security-policy-change",
+    "spending-limit-change",
+    "irreversible-data-change",
+    "production-promotion",
+    "policy-change"
+  ],
+  "policy_change": {
+    "requires_human_review": true,
+    "self_approval_forbidden": true
+  }
+}

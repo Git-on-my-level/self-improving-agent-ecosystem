@@ -1,0 +1,101 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-ecosystems/main/schemas/ecosystem.schema.json",
+  "schema_version": 1,
+  "name": "__ECOSYSTEM_NAME__",
+  "owner": "replace-with-accountable-owner",
+  "description": "One bounded evaluator-driven improvement loop",
+  "roles": {
+    "observer": {
+      "identity": "ecosystem-observer",
+      "capabilities": ["evidence-read", "evidence-write"],
+      "state_root": ".state/observer",
+      "credential_source": "owner-only native credential store"
+    },
+    "builder": {
+      "identity": "ecosystem-builder",
+      "capabilities": ["candidate-write", "test-execute"],
+      "state_root": ".state/builder"
+    },
+    "evaluator": {
+      "identity": "ecosystem-evaluator",
+      "capabilities": ["candidate-read", "fixture-read", "evaluation-write"],
+      "state_root": ".state/evaluator"
+    },
+    "publisher": {
+      "identity": "ecosystem-publisher",
+      "capabilities": ["accepted-read", "branch-push", "review-request-write"],
+      "state_root": ".state/publisher",
+      "credential_source": "scoped source-control credential"
+    }
+  },
+  "loops": [
+    {
+      "id": "improve",
+      "mode": "rank",
+      "schedule": {
+        "kind": "manual",
+        "max_concurrency": 1
+      },
+      "sensors": [
+        {
+          "id": "local-evidence",
+          "kind": "deterministic",
+          "command": "./sensors/collect.sh",
+          "freshness_seconds": 3600
+        }
+      ],
+      "driver": {
+        "kind": "agent",
+        "command": "./adapters/agent.sh",
+        "role": "builder",
+        "model_policy": "reviewed-policy-default"
+      },
+      "evaluator": {
+        "scorer": "./evaluators/score.py",
+        "hard_gates": [
+          "tests-pass",
+          "protected-paths-unchanged",
+          "evidence-complete",
+          "minimum-sample"
+        ],
+        "verifier": "./evaluators/verify.py",
+        "minimum_samples": 20,
+        "attribution_required": true,
+        "max_evidence_age_seconds": 3600
+      },
+      "promotion": {
+        "stages": ["review", "staging", "l0", "canary", "l1", "soak", "production", "outcome"],
+        "reconcile_command": "./promotion/reconcile.sh",
+        "rollback_command": "./promotion/rollback.sh",
+        "human_gate_before": "production"
+      },
+      "authority": "propose",
+      "budgets": {
+        "max_attempts_per_day": 8,
+        "max_cost_per_day": 10,
+        "currency": "USD"
+      }
+    }
+  ],
+  "state": {
+    "event_store": ".state/events.jsonl",
+    "artifact_root": ".state/artifacts",
+    "retention_days": 90,
+    "offsite_backup": "declare-before-unattended-use"
+  },
+  "health": {
+    "export_command": "./health/export.sh",
+    "deadman": "declare-external-observer-before-unattended-use",
+    "required_fields": [
+      "last_attempt",
+      "last_valid_evaluation",
+      "status",
+      "stall_count",
+      "accepted_revision",
+      "promoted_revision",
+      "deployed_revision",
+      "observer_freshness",
+      "lineage_gap"
+    ]
+  }
+}

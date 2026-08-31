@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-ecosystems/main/schemas/event.schema.json",
+  "title": "Self-improving ecosystem event",
+  "type": "object",
+  "required": ["schema_version", "event_id", "type", "occurred_at", "ecosystem", "loop", "idempotency_key", "actor", "lineage", "evidence", "result", "authority"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "event_id": {"type": "string", "minLength": 8},
+    "type": {
+      "enum": [
+        "observation_recorded", "observer_failed", "no_action",
+        "candidate_started", "candidate_built", "candidate_scored",
+        "candidate_rejected", "verification_failed", "candidate_accepted",
+        "evaluation_invalidated", "candidate_superseded", "approval_requested",
+        "approval_granted", "promotion_started", "promotion_reconciled",
+        "promotion_failed", "artifact_promoted", "deployment_observed",
+        "outcome_evaluated", "incident_resolved", "regression_detected",
+        "candidate_quarantined", "rollback_started", "rollback_completed",
+        "loop_stalled", "loop_resumed", "budget_exhausted", "deadman_missed",
+        "state_repaired"
+      ]
+    },
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "ecosystem": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+    "loop": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+    "candidate_id": {"type": ["string", "null"]},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "supersedes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "actor": {
+      "type": "object",
+      "required": ["role", "implementation"],
+      "properties": {
+        "role": {"type": "string", "minLength": 1},
+        "implementation": {"type": "string", "minLength": 1},
+        "model": {"type": ["string", "null"]},
+        "provider": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "lineage": {
+      "type": "object",
+      "properties": {
+        "base_revision": {"type": ["string", "null"]},
+        "candidate_revision": {"type": ["string", "null"]},
+        "accepted_revision": {"type": ["string", "null"]},
+        "promoted_revision": {"type": ["string", "null"]},
+        "deployed_revision": {"type": ["string", "null"]},
+        "evaluator_revision": {"type": ["string", "null"]},
+        "artifact_digest": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["uri", "digest"],
+        "properties": {
+          "uri": {"type": "string", "minLength": 1},
+          "digest": {"type": "string", "minLength": 1},
+          "observed_at": {"type": ["string", "null"], "format": "date-time"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["status", "reason"],
+      "properties": {
+        "status": {"enum": ["ok", "no_action", "rejected", "failed", "stale", "unobserved", "pending", "degraded", "quarantined", "rolled_back", "superseded"]},
+        "reason": {"type": "string", "minLength": 1},
+        "correct": {"type": ["boolean", "null"]},
+        "objective": {"type": ["number", "null"]},
+        "metrics": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "authority": {
+      "type": "object",
+      "required": ["level", "decision"],
+      "properties": {
+        "level": {"enum": ["observe", "propose", "publish", "stage", "promote", "major"]},
+        "decision": {"enum": ["allowed", "denied", "pending_human", "approved_by_human"]},
+        "approver": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "extensions": {"type": "object"}
+  },
+  "additionalProperties": false
+}

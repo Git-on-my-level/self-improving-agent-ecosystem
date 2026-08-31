@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-ecosystems/main/schemas/policy.schema.json",
+  "title": "Self-improving ecosystem authority policy",
+  "type": "object",
+  "required": ["schema_version", "default", "roles", "human_only", "policy_change"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "default": {"const": "deny"},
+    "roles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["allow", "deny"],
+        "properties": {
+          "allow": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "deny": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "human_only": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true},
+    "policy_change": {
+      "type": "object",
+      "required": ["requires_human_review", "self_approval_forbidden"],
+      "properties": {
+        "requires_human_review": {"const": true},
+        "self_approval_forbidden": {"const": true}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Self-Improving Ecosystem"
+  short_description: "Build and audit safe evaluator-driven improvement loops"
+  default_prompt: "Design or improve this self-improving ecosystem using hard gates, evidence lineage, safe promotion, and external health."
