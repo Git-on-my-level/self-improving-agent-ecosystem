@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-ecosystems/main/schemas/policy.schema.json",
+  "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/policy.schema.json",
   "title": "Self-improving ecosystem authority policy",
   "type": "object",
   "required": ["schema_version", "default", "roles", "human_only", "policy_change"],

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-ecosystems/main/schemas/event.schema.json",
+  "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/event.schema.json",
   "title": "Self-improving ecosystem event",
   "type": "object",
   "required": ["schema_version", "event_id", "type", "occurred_at", "ecosystem", "loop", "idempotency_key", "actor", "lineage", "evidence", "result", "authority"],

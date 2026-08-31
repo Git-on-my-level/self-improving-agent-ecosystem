@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-ecosystems/main/schemas/ecosystem.schema.json",
+  "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/ecosystem.schema.json",
   "title": "Self-improving ecosystem manifest",
   "type": "object",
   "required": ["schema_version", "name", "owner", "roles", "loops", "state", "health"],

@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-ecosystems/main/schemas/ecosystem.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/ecosystem.schema.json",
   "schema_version": 1,
   "name": "__ECOSYSTEM_NAME__",
   "owner": "replace-with-accountable-owner",

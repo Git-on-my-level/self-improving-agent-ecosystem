@@ -66,8 +66,8 @@ Requirements: Git, Python 3.10+, and a POSIX shell. The validation helpers use
 only the Python standard library.
 
 ```bash
-git clone https://github.com/Git-on-my-level/self-improving-ecosystems.git
-cd self-improving-ecosystems
+git clone https://github.com/Git-on-my-level/self-improving-agent-ecosystem.git
+cd self-improving-agent-ecosystem
 
 # Optional: install the known AVO-lite revision without executing it.
 ./scripts/install-avo-lite.sh --prefix .tools/avo-lite
