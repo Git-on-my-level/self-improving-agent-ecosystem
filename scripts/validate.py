@@ -17,7 +17,7 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 EVENT_TYPES = {
     "observation_recorded", "observer_failed", "no_action",
     "candidate_started", "candidate_built", "candidate_scored",
-    "candidate_rejected", "verification_failed", "candidate_accepted",
+    "candidate_rejected", "candidate_failed", "verification_failed", "candidate_accepted",
     "evaluation_invalidated", "candidate_superseded", "approval_requested",
     "approval_granted", "promotion_started", "promotion_reconciled",
     "promotion_failed", "artifact_promoted", "deployment_observed",
@@ -61,7 +61,9 @@ def _type_matches(value: Any, expected: str) -> bool:
     return True
 
 
-def validate_schema_instance(value: Any, schema: dict[str, Any], path: str, findings: Findings) -> None:
+def validate_schema_instance(
+    value: Any, schema: dict[str, Any], path: str, findings: Findings, allow_placeholders: bool = False,
+) -> None:
     """Validate the JSON-Schema subset used by this repository, without dependencies."""
     expected = schema.get("type")
     if expected is not None:
@@ -69,18 +71,22 @@ def validate_schema_instance(value: Any, schema: dict[str, Any], path: str, find
         if not any(_type_matches(value, item) for item in types):
             findings.error(f"{path}: expected {' or '.join(types)}")
             return
-    if "const" in schema and value != schema["const"]:
-        findings.error(f"{path}: must equal {schema['const']!r}")
-    if "enum" in schema and value not in schema["enum"]:
-        findings.error(f"{path}: invalid value {value!r}")
-    if isinstance(value, str):
-        if len(value) < int(schema.get("minLength", 0)):
-            findings.error(f"{path}: string is too short")
-        pattern = schema.get("pattern")
-        if pattern and re.fullmatch(pattern, value) is None:
-            findings.error(f"{path}: does not match required pattern")
-        if schema.get("format") == "date-time" and not parse_datetime(value):
-            findings.error(f"{path}: must be timezone-aware ISO-8601")
+    if isinstance(value, str) and allow_placeholders and has_placeholder(value):
+        # Template tokens are checked by --allow-placeholders warnings, not pattern/const/enum.
+        pass
+    else:
+        if "const" in schema and value != schema["const"]:
+            findings.error(f"{path}: must equal {schema['const']!r}")
+        if "enum" in schema and value not in schema["enum"]:
+            findings.error(f"{path}: invalid value {value!r}")
+        if isinstance(value, str):
+            if len(value) < int(schema.get("minLength", 0)):
+                findings.error(f"{path}: string is too short")
+            pattern = schema.get("pattern")
+            if pattern and re.fullmatch(pattern, value) is None:
+                findings.error(f"{path}: does not match required pattern")
+            if schema.get("format") == "date-time" and not parse_datetime(value):
+                findings.error(f"{path}: must be timezone-aware ISO-8601")
     if isinstance(value, (int, float)) and not isinstance(value, bool) and "minimum" in schema:
         if not math.isfinite(float(value)) or float(value) < float(schema["minimum"]):
             findings.error(f"{path}: must be >= {schema['minimum']}")
@@ -94,7 +100,7 @@ def validate_schema_instance(value: Any, schema: dict[str, Any], path: str, find
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):
-                validate_schema_instance(item, item_schema, f"{path}[{index}]", findings)
+                validate_schema_instance(item, item_schema, f"{path}[{index}]", findings, allow_placeholders)
     if isinstance(value, dict):
         if len(value) < int(schema.get("minProperties", 0)):
             findings.error(f"{path}: requires at least {schema['minProperties']} properties")
@@ -106,9 +112,9 @@ def validate_schema_instance(value: Any, schema: dict[str, Any], path: str, find
         for key, item in value.items():
             child = f"{path}.{key}"
             if key in properties:
-                validate_schema_instance(item, properties[key], child, findings)
+                validate_schema_instance(item, properties[key], child, findings, allow_placeholders)
             elif isinstance(additional, dict):
-                validate_schema_instance(item, additional, child, findings)
+                validate_schema_instance(item, additional, child, findings, allow_placeholders)
             elif additional is False:
                 findings.error(f"{path}: unknown field {key}")
 
@@ -361,11 +367,11 @@ def main() -> int:
     policy = load_json(target / "policy.json", findings)
     if manifest is not None:
         schema = json.loads((repo_root / "schemas" / "ecosystem.schema.json").read_text())
-        validate_schema_instance(manifest, schema, "ecosystem.json", findings)
+        validate_schema_instance(manifest, schema, "ecosystem.json", findings, args.allow_placeholders)
         validate_manifest(manifest, findings, args.allow_placeholders)
     if policy is not None:
         schema = json.loads((repo_root / "schemas" / "policy.schema.json").read_text())
-        validate_schema_instance(policy, schema, "policy.json", findings)
+        validate_schema_instance(policy, schema, "policy.json", findings, args.allow_placeholders)
         validate_policy(policy, findings, args.allow_placeholders)
     event_path = target / str((manifest or {}).get("state", {}).get("event_store", "events.jsonl"))
     # Validate each event against the declared schema as well as cross-file invariants.
@@ -378,7 +384,9 @@ def main() -> int:
                 event_value = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            validate_schema_instance(event_value, event_schema, f"events.jsonl:{line_number}", findings)
+            validate_schema_instance(
+                event_value, event_schema, f"events.jsonl:{line_number}", findings, args.allow_placeholders,
+            )
     validate_events(event_path, manifest, findings, args.allow_placeholders)
 
     for message in findings.warnings:

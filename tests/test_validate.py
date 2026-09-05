@@ -139,6 +139,39 @@ class ValidateTests(unittest.TestCase):
             result = subprocess.run([sys.executable, str(VALIDATOR), str(target)], text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
+    def test_templates_validate_with_allow_placeholders(self) -> None:
+        templates = ROOT / "templates"
+        result = subprocess.run(
+            [sys.executable, str(VALIDATOR), str(templates), "--allow-placeholders"],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_avo_bridge_maps_error_to_candidate_failed_and_keeps_ledger_ts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp)
+            target = self.initialized(base)
+            avo = base / "avo"
+            run = avo / "runs" / "000002"
+            run.mkdir(parents=True)
+            (run / "score.json").write_text("{}")
+            ledger = avo / "ledger.jsonl"
+            ledger.write_text(json.dumps({
+                "tick": 2, "action": "error", "ts": "2026-02-03T04:05:06Z",
+                "note": "scorer timeout", "parent": "base123",
+                "diff_hash": "def456", "metrics": {}, "run_dir": "runs/000002",
+            }) + "\n")
+            output = target / "bridged.jsonl"
+            subprocess.check_call([
+                sys.executable, str(BRIDGE), "--ledger", str(ledger),
+                "--ecosystem", str(target / "ecosystem.json"), "--loop", "improve",
+                "--evaluator-revision", "eval-v1", "--output", str(output),
+            ])
+            event = json.loads(output.read_text())
+            self.assertEqual(event["type"], "candidate_failed")
+            self.assertEqual(event["result"]["status"], "failed")
+            self.assertEqual(event["occurred_at"], "2026-02-03T04:05:06Z")
+
 
 if __name__ == "__main__":
     unittest.main()

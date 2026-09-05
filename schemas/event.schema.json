@@ -12,7 +12,7 @@
       "enum": [
         "observation_recorded", "observer_failed", "no_action",
         "candidate_started", "candidate_built", "candidate_scored",
-        "candidate_rejected", "verification_failed", "candidate_accepted",
+        "candidate_rejected", "candidate_failed", "verification_failed", "candidate_accepted",
         "evaluation_invalidated", "candidate_superseded", "approval_requested",
         "approval_granted", "promotion_started", "promotion_reconciled",
         "promotion_failed", "artifact_promoted", "deployment_observed",

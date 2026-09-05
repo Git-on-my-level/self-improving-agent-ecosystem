@@ -25,7 +25,7 @@ def main() -> int:
         print(f"unknown loop: {a.loop}", file=sys.stderr); return 2
     run_root=a.ledger.parent
     events=[]
-    mapping={"accept":"candidate_accepted","reject":"candidate_rejected","error":"candidate_rejected"}
+    mapping={"accept":"candidate_accepted","reject":"candidate_rejected","error":"candidate_failed"}
     for raw in a.ledger.read_text().splitlines():
         if not raw.strip(): continue
         item=json.loads(raw); action=item.get("action")
@@ -42,7 +42,7 @@ def main() -> int:
         event={
           "schema_version":1,
           "event_id":f"avo-{a.loop}-{tick}-{diff}",
-          "type":mapping[action], "occurred_at":now(), "ecosystem":manifest["name"], "loop":a.loop,
+          "type":mapping[action], "occurred_at":item.get("ts") or now(), "ecosystem":manifest["name"], "loop":a.loop,
           "candidate_id":candidate, "idempotency_key":f"avo:{a.loop}:{tick}:{diff}:{action}",
           "actor":{"role":loop["driver"]["role"],"implementation":"avo-lite","model":item.get("agent_model") or None,"provider":None},
           "lineage":{"base_revision":item.get("parent"),"candidate_revision":candidate,"accepted_revision":accepted,
