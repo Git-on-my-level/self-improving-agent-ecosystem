@@ -73,14 +73,15 @@ cd self-improving-agent-ecosystem
 ./scripts/install-avo-lite.sh --prefix .tools/avo-lite
 
 # Create a small local scaffold from the public templates.
-./scripts/init-ecosystem.sh ../my-ecosystem my-ecosystem
+./scripts/init-ecosystem.sh ../my-ecosystem my-ecosystem project
 
 # Validate its manifest, policy, and example event stream.
 python3 scripts/validate.py ../my-ecosystem
 ```
 
-The generated scaffold fails closed: validation reports the owner, backup,
-deadman, and command stubs until they are deliberately configured.
+Choose `local`, `project`, or `live` when scaffolding. The profiles share one architecture but scale operational requirements to consequence: local experiments do not require offsite/deadman machinery, project mode warns on missing operational controls, and live mode requires them. Every scaffold includes `MISSION.md` so outcome, acceptance evidence, authority, non-goals, and stop conditions are explicit before automation.
+
+The generated commands still fail closed until real sensors/adapters are configured.
 
 The AVO-lite installer defaults to a reviewed commit rather than a moving
 branch. Inspect the checkout and its current documentation before running it.
@@ -122,7 +123,7 @@ docs/       Human architecture and operating guides
 schemas/    JSON Schemas for manifests, policy, and events
 templates/  Copyable ecosystem skeleton
 examples/   Small evaluator and verifier examples
-scripts/    Zero-dependency installer, scaffold, and validator
+scripts/    Zero-dependency installer, scaffold, validator, and AVO event bridge
 skills/     Portable agent skill and focused references
 tests/      Contract tests and reward-hacking regression fixtures
 ```

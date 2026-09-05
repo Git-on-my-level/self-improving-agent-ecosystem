@@ -18,7 +18,12 @@ def main() -> int:
         observation = json.loads((candidate / "observation.json").read_text())
         score = json.loads(pathlib.Path(sys.argv[2]).read_text())
         reasons: list[str] = []
-        if not score.get("correct"):
+        for field in ("attribution_complete", "eligible_identity_verified"):
+            if not isinstance(observation.get(field), bool):
+                reasons.append(f"{field} must be boolean")
+        if not isinstance(score.get("correct"), bool):
+            reasons.append("score.correct must be boolean")
+        if score.get("correct") is not True:
             reasons.append("score did not pass correctness")
         if not observation.get("attribution_complete"):
             reasons.append("attribution incomplete")

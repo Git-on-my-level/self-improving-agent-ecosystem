@@ -41,3 +41,18 @@ An update to the default pin should include:
 - rollback to the old source checkout.
 
 Avoid a moving `main` checkout in unattended scheduler configuration.
+
+## Event bridge
+
+`scripts/avo-to-event.py` converts terminal AVO ledger records into the ecosystem event contract without making the ecosystem a second source of truth for AVO state. Supply the evaluator revision explicitly:
+
+```bash
+python3 scripts/avo-to-event.py \
+  --ledger /path/to/project/.avo/ledger.jsonl \
+  --ecosystem ./ecosystem.json \
+  --loop improve \
+  --evaluator-revision eval-2026-09-04 \
+  --output events.jsonl
+```
+
+AVO remains authoritative for attempts and accepted commits. Ecosystem events add promotion, deployment, outcome, and authority state. Replaying the same AVO terminal record yields the same idempotency key.

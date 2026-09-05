@@ -7,23 +7,37 @@
   "roles": {
     "observer": {
       "identity": "ecosystem-observer",
-      "capabilities": ["evidence-read", "evidence-write"],
+      "capabilities": [
+        "evidence-read",
+        "evidence-write"
+      ],
       "state_root": ".state/observer",
       "credential_source": "owner-only native credential store"
     },
     "builder": {
       "identity": "ecosystem-builder",
-      "capabilities": ["candidate-write", "test-execute"],
+      "capabilities": [
+        "candidate-write",
+        "test-execute"
+      ],
       "state_root": ".state/builder"
     },
     "evaluator": {
       "identity": "ecosystem-evaluator",
-      "capabilities": ["candidate-read", "fixture-read", "evaluation-write"],
+      "capabilities": [
+        "candidate-read",
+        "fixture-read",
+        "evaluation-write"
+      ],
       "state_root": ".state/evaluator"
     },
     "publisher": {
       "identity": "ecosystem-publisher",
-      "capabilities": ["accepted-read", "branch-push", "review-request-write"],
+      "capabilities": [
+        "accepted-read",
+        "branch-push",
+        "review-request-write"
+      ],
       "state_root": ".state/publisher",
       "credential_source": "scoped source-control credential"
     }
@@ -64,7 +78,16 @@
         "max_evidence_age_seconds": 3600
       },
       "promotion": {
-        "stages": ["review", "staging", "l0", "canary", "l1", "soak", "production", "outcome"],
+        "stages": [
+          "review",
+          "staging",
+          "l0",
+          "canary",
+          "l1",
+          "soak",
+          "production",
+          "outcome"
+        ],
         "reconcile_command": "./promotion/reconcile.sh",
         "rollback_command": "./promotion/rollback.sh",
         "human_gate_before": "production"
@@ -78,7 +101,7 @@
     }
   ],
   "state": {
-    "event_store": ".state/events.jsonl",
+    "event_store": "events.jsonl",
     "artifact_root": ".state/artifacts",
     "retention_days": 90,
     "offsite_backup": "declare-before-unattended-use"
@@ -97,5 +120,6 @@
       "observer_freshness",
       "lineage_gap"
     ]
-  }
+  },
+  "profile": "project"
 }

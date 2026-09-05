@@ -38,6 +38,9 @@ def score(candidate: pathlib.Path) -> dict[str, object]:
     missing = sorted(required - data.keys())
     if missing:
         return result(False, None, f"missing fields: {', '.join(missing)}", missing=missing)
+    for field in ("tests_passed", "attribution_complete", "eligible_identity_verified"):
+        if not isinstance(data[field], bool):
+            return result(False, None, f"{field} must be boolean")
     if not data["tests_passed"]:
         return result(False, None, "hard tests failed")
     if not data["attribution_complete"]:

@@ -3,28 +3,63 @@
   "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/ecosystem.schema.json",
   "title": "Self-improving ecosystem manifest",
   "type": "object",
-  "required": ["schema_version", "name", "owner", "roles", "loops", "state", "health"],
+  "required": [
+    "schema_version",
+    "name",
+    "owner",
+    "roles",
+    "loops",
+    "state",
+    "health"
+  ],
   "properties": {
-    "$schema": {"type": "string"},
-    "schema_version": {"const": 1},
-    "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$"},
-    "owner": {"type": "string", "minLength": 1},
-    "description": {"type": "string"},
+    "$schema": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,62}$"
+    },
+    "owner": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
     "roles": {
       "type": "object",
       "minProperties": 3,
       "additionalProperties": {
         "type": "object",
-        "required": ["identity", "capabilities", "state_root"],
+        "required": [
+          "identity",
+          "capabilities",
+          "state_root"
+        ],
         "properties": {
-          "identity": {"type": "string", "minLength": 1},
+          "identity": {
+            "type": "string",
+            "minLength": 1
+          },
           "capabilities": {
             "type": "array",
-            "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
             "uniqueItems": true
           },
-          "state_root": {"type": "string", "minLength": 1},
-          "credential_source": {"type": "string"}
+          "state_root": {
+            "type": "string",
+            "minLength": 1
+          },
+          "credential_source": {
+            "type": "string"
+          }
         },
         "additionalProperties": false
       }
@@ -34,18 +69,51 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["id", "mode", "schedule", "sensors", "driver", "evaluator", "authority", "budgets"],
+        "required": [
+          "id",
+          "mode",
+          "schedule",
+          "sensors",
+          "driver",
+          "evaluator",
+          "authority",
+          "budgets"
+        ],
         "properties": {
-          "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
-          "mode": {"enum": ["rank", "discover", "monitor"]},
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "mode": {
+            "enum": [
+              "rank",
+              "discover",
+              "monitor"
+            ]
+          },
           "schedule": {
             "type": "object",
-            "required": ["kind"],
+            "required": [
+              "kind"
+            ],
             "properties": {
-              "kind": {"enum": ["cron", "timer", "manual"]},
-              "expression": {"type": "string"},
-              "timezone": {"type": "string"},
-              "max_concurrency": {"type": "integer", "minimum": 1}
+              "kind": {
+                "enum": [
+                  "cron",
+                  "timer",
+                  "manual"
+                ]
+              },
+              "expression": {
+                "type": "string"
+              },
+              "timezone": {
+                "type": "string"
+              },
+              "max_concurrency": {
+                "type": "integer",
+                "minimum": 1
+              }
             },
             "additionalProperties": false
           },
@@ -53,67 +121,170 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["id", "kind", "command", "freshness_seconds"],
+              "required": [
+                "id",
+                "kind",
+                "command",
+                "freshness_seconds"
+              ],
               "properties": {
-                "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
-                "kind": {"enum": ["deterministic", "agent"]},
-                "command": {"type": "string", "minLength": 1},
-                "freshness_seconds": {"type": "integer", "minimum": 1}
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]*$"
+                },
+                "kind": {
+                  "enum": [
+                    "deterministic",
+                    "agent"
+                  ]
+                },
+                "command": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "freshness_seconds": {
+                  "type": "integer",
+                  "minimum": 1
+                }
               },
               "additionalProperties": false
             }
           },
           "driver": {
             "type": "object",
-            "required": ["kind", "command", "role"],
+            "required": [
+              "kind",
+              "command",
+              "role"
+            ],
             "properties": {
-              "kind": {"enum": ["agent", "deterministic"]},
-              "command": {"type": "string", "minLength": 1},
-              "role": {"type": "string", "minLength": 1},
-              "model_policy": {"type": "string"}
+              "kind": {
+                "enum": [
+                  "agent",
+                  "deterministic"
+                ]
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1
+              },
+              "role": {
+                "type": "string",
+                "minLength": 1
+              },
+              "model_policy": {
+                "type": "string"
+              }
             },
             "additionalProperties": false
           },
           "evaluator": {
             "type": "object",
-            "required": ["scorer", "hard_gates", "verifier", "minimum_samples", "attribution_required"],
+            "required": [
+              "scorer",
+              "hard_gates",
+              "verifier",
+              "minimum_samples",
+              "attribution_required"
+            ],
             "properties": {
-              "scorer": {"type": "string", "minLength": 1},
+              "scorer": {
+                "type": "string",
+                "minLength": 1
+              },
               "hard_gates": {
                 "type": "array",
                 "minItems": 1,
-                "items": {"type": "string", "minLength": 1}
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
               },
-              "verifier": {"type": "string", "minLength": 1},
-              "minimum_samples": {"type": "integer", "minimum": 1},
-              "attribution_required": {"type": "boolean"},
-              "max_evidence_age_seconds": {"type": "integer", "minimum": 1}
+              "verifier": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minimum_samples": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "attribution_required": {
+                "type": "boolean"
+              },
+              "max_evidence_age_seconds": {
+                "type": "integer",
+                "minimum": 1
+              }
             },
             "additionalProperties": false
           },
           "promotion": {
             "type": "object",
-            "required": ["stages", "reconcile_command", "rollback_command"],
+            "required": [
+              "stages",
+              "reconcile_command",
+              "rollback_command"
+            ],
             "properties": {
               "stages": {
                 "type": "array",
-                "items": {"enum": ["review", "staging", "l0", "canary", "l1", "soak", "production", "outcome"]},
+                "items": {
+                  "enum": [
+                    "review",
+                    "staging",
+                    "l0",
+                    "canary",
+                    "l1",
+                    "soak",
+                    "production",
+                    "outcome"
+                  ]
+                },
                 "uniqueItems": true
               },
-              "reconcile_command": {"type": "string", "minLength": 1},
-              "rollback_command": {"type": "string", "minLength": 1},
-              "human_gate_before": {"type": "string"}
+              "reconcile_command": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rollback_command": {
+                "type": "string",
+                "minLength": 1
+              },
+              "human_gate_before": {
+                "type": "string"
+              }
             },
             "additionalProperties": false
           },
-          "authority": {"enum": ["observe", "propose", "publish", "stage", "promote"]},
+          "authority": {
+            "enum": [
+              "observe",
+              "propose",
+              "publish",
+              "stage",
+              "promote"
+            ]
+          },
           "budgets": {
             "type": "object",
-            "required": ["max_attempts_per_day", "max_cost_per_day", "currency"],
+            "required": [
+              "max_attempts_per_day",
+              "max_cost_per_day",
+              "currency"
+            ],
             "properties": {
-              "max_attempts_per_day": {"type": "integer", "minimum": 1},
-              "max_cost_per_day": {"type": "number", "minimum": 0},
-              "currency": {"type": "string", "pattern": "^[A-Z]{3}$"}
+              "max_attempts_per_day": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_cost_per_day": {
+                "type": "number",
+                "minimum": 0
+              },
+              "currency": {
+                "type": "string",
+                "pattern": "^[A-Z]{3}$"
+              }
             },
             "additionalProperties": false
           }
@@ -123,31 +294,68 @@
     },
     "state": {
       "type": "object",
-      "required": ["event_store", "artifact_root", "retention_days"],
+      "required": [
+        "event_store",
+        "artifact_root",
+        "retention_days"
+      ],
       "properties": {
-        "event_store": {"type": "string", "minLength": 1},
-        "artifact_root": {"type": "string", "minLength": 1},
-        "retention_days": {"type": "integer", "minimum": 1},
-        "offsite_backup": {"type": "string"}
+        "event_store": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifact_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retention_days": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "offsite_backup": {
+          "type": "string"
+        }
       },
       "additionalProperties": false
     },
     "health": {
       "type": "object",
-      "required": ["export_command", "deadman", "required_fields"],
+      "required": [
+        "export_command",
+        "deadman",
+        "required_fields"
+      ],
       "properties": {
-        "export_command": {"type": "string", "minLength": 1},
-        "deadman": {"type": "string", "minLength": 1},
+        "export_command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deadman": {
+          "type": "string",
+          "minLength": 1
+        },
         "required_fields": {
           "type": "array",
           "minItems": 1,
-          "items": {"type": "string", "minLength": 1},
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "uniqueItems": true
         }
       },
       "additionalProperties": false
     },
-    "extensions": {"type": "object"}
+    "extensions": {
+      "type": "object"
+    },
+    "profile": {
+      "enum": [
+        "local",
+        "project",
+        "live"
+      ]
+    }
   },
   "additionalProperties": false
 }
