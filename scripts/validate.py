@@ -17,7 +17,7 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 EVENT_TYPES = {
     "observation_recorded", "observer_failed", "no_action",
     "candidate_started", "candidate_built", "candidate_scored",
-    "candidate_rejected", "verification_failed", "candidate_accepted",
+    "candidate_rejected", "candidate_failed", "verification_failed", "candidate_accepted",
     "evaluation_invalidated", "candidate_superseded", "approval_requested",
     "approval_granted", "promotion_started", "promotion_reconciled",
     "promotion_failed", "artifact_promoted", "deployment_observed",
@@ -48,6 +48,75 @@ class Findings:
 
     def warn(self, message: str) -> None:
         self.warnings.append(message)
+
+
+def _type_matches(value: Any, expected: str) -> bool:
+    if expected == "object": return isinstance(value, dict)
+    if expected == "array": return isinstance(value, list)
+    if expected == "string": return isinstance(value, str)
+    if expected == "boolean": return isinstance(value, bool)
+    if expected == "null": return value is None
+    if expected == "integer": return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number": return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+    return True
+
+
+def validate_schema_instance(
+    value: Any, schema: dict[str, Any], path: str, findings: Findings, allow_placeholders: bool = False,
+) -> None:
+    """Validate the JSON-Schema subset used by this repository, without dependencies."""
+    expected = schema.get("type")
+    if expected is not None:
+        types = expected if isinstance(expected, list) else [expected]
+        if not any(_type_matches(value, item) for item in types):
+            findings.error(f"{path}: expected {' or '.join(types)}")
+            return
+    if isinstance(value, str) and allow_placeholders and has_placeholder(value):
+        # Template tokens are checked by --allow-placeholders warnings, not pattern/const/enum.
+        pass
+    else:
+        if "const" in schema and value != schema["const"]:
+            findings.error(f"{path}: must equal {schema['const']!r}")
+        if "enum" in schema and value not in schema["enum"]:
+            findings.error(f"{path}: invalid value {value!r}")
+        if isinstance(value, str):
+            if len(value) < int(schema.get("minLength", 0)):
+                findings.error(f"{path}: string is too short")
+            pattern = schema.get("pattern")
+            if pattern and re.fullmatch(pattern, value) is None:
+                findings.error(f"{path}: does not match required pattern")
+            if schema.get("format") == "date-time" and not parse_datetime(value):
+                findings.error(f"{path}: must be timezone-aware ISO-8601")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and "minimum" in schema:
+        if not math.isfinite(float(value)) or float(value) < float(schema["minimum"]):
+            findings.error(f"{path}: must be >= {schema['minimum']}")
+    if isinstance(value, list):
+        if len(value) < int(schema.get("minItems", 0)):
+            findings.error(f"{path}: requires at least {schema['minItems']} item(s)")
+        if schema.get("uniqueItems"):
+            rendered = [json.dumps(item, sort_keys=True) for item in value]
+            if len(rendered) != len(set(rendered)):
+                findings.error(f"{path}: items must be unique")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                validate_schema_instance(item, item_schema, f"{path}[{index}]", findings, allow_placeholders)
+    if isinstance(value, dict):
+        if len(value) < int(schema.get("minProperties", 0)):
+            findings.error(f"{path}: requires at least {schema['minProperties']} properties")
+        for key in schema.get("required", []):
+            if key not in value:
+                findings.error(f"{path}: missing required field {key}")
+        properties = schema.get("properties", {})
+        additional = schema.get("additionalProperties", True)
+        for key, item in value.items():
+            child = f"{path}.{key}"
+            if key in properties:
+                validate_schema_instance(item, properties[key], child, findings, allow_placeholders)
+            elif isinstance(additional, dict):
+                validate_schema_instance(item, additional, child, findings, allow_placeholders)
+            elif additional is False:
+                findings.error(f"{path}: unknown field {key}")
 
 
 def load_json(path: pathlib.Path, findings: Findings) -> dict[str, Any] | None:
@@ -155,14 +224,23 @@ def validate_manifest(data: dict[str, Any], findings: Findings, allow_placeholde
         if authority in {"publish", "stage", "promote"} and not loop.get("promotion"):
             findings.error(f"{prefix} has {authority} authority without a promotion contract")
 
+    profile = data.get("profile", "project")
+    if profile not in {"local", "project", "live"}:
+        findings.error("ecosystem.json profile must be local, project, or live")
     state = data.get("state")
     if not isinstance(state, dict):
         findings.error("ecosystem.json must declare state")
-    elif not state.get("offsite_backup"):
-        findings.warn("state has no offsite backup declaration")
+    elif profile == "live" and not state.get("offsite_backup"):
+        findings.error("live profile requires an offsite backup declaration")
+    elif profile == "project" and not state.get("offsite_backup"):
+        findings.warn("project profile has no offsite backup declaration")
     health = data.get("health")
-    if not isinstance(health, dict) or not health.get("deadman"):
-        findings.error("ecosystem.json must declare an external deadman")
+    if not isinstance(health, dict):
+        findings.error("ecosystem.json must declare health")
+    elif profile == "live" and not health.get("deadman"):
+        findings.error("live profile requires an external deadman")
+    elif profile == "project" and not health.get("deadman"):
+        findings.warn("project profile has no external deadman")
     if has_placeholder(data):
         message = "ecosystem.json contains unresolved replace/declare placeholders"
         findings.warn(message) if allow_placeholders else findings.error(message)
@@ -200,7 +278,10 @@ def parse_datetime(value: Any) -> bool:
     return parsed.tzinfo is not None
 
 
-def validate_events(path: pathlib.Path, manifest_name: str | None, findings: Findings, allow_placeholders: bool) -> None:
+def validate_events(path: pathlib.Path, manifest: dict[str, Any] | None, findings: Findings, allow_placeholders: bool) -> None:
+    manifest_name = manifest.get("name") if manifest else None
+    loops = {item.get("id"): item for item in (manifest or {}).get("loops", []) if isinstance(item, dict)}
+    roles = set((manifest or {}).get("roles", {}))
     try:
         lines = path.read_text().splitlines()
     except FileNotFoundError:
@@ -231,6 +312,12 @@ def validate_events(path: pathlib.Path, manifest_name: str | None, findings: Fin
         event_type = event.get("type")
         if event_type not in EVENT_TYPES:
             findings.error(f"events.jsonl:{line_number}: unknown event type {event_type!r}")
+        loop_id = event.get("loop")
+        if manifest and loop_id not in loops:
+            findings.error(f"events.jsonl:{line_number}: unknown loop {loop_id!r}")
+        actor = event.get("actor")
+        if isinstance(actor, dict) and manifest and actor.get("role") not in roles:
+            findings.error(f"events.jsonl:{line_number}: unknown actor role {actor.get('role')!r}")
         if not parse_datetime(event.get("occurred_at")):
             findings.error(f"events.jsonl:{line_number}: occurred_at must be timezone-aware ISO-8601")
         ecosystem = event.get("ecosystem")
@@ -249,8 +336,11 @@ def validate_events(path: pathlib.Path, manifest_name: str | None, findings: Fin
             objective = result.get("objective")
             if result.get("correct") is not True:
                 findings.error(f"events.jsonl:{line_number}: accepted candidate must be correct")
-            if not isinstance(objective, (int, float)) or not math.isfinite(float(objective)):
-                findings.error(f"events.jsonl:{line_number}: accepted candidate needs finite objective")
+            mode = loops.get(event.get("loop"), {}).get("mode")
+            if mode == "rank" and (not isinstance(objective, (int, float)) or isinstance(objective, bool) or not math.isfinite(float(objective))):
+                findings.error(f"events.jsonl:{line_number}: rank-mode accepted candidate needs finite objective")
+            if mode == "discover" and objective is not None and (not isinstance(objective, (int, float)) or isinstance(objective, bool) or not math.isfinite(float(objective))):
+                findings.error(f"events.jsonl:{line_number}: discover objective must be finite or null")
 
 
 def validate_schemas(repo_root: pathlib.Path, findings: Findings) -> None:
@@ -276,11 +366,28 @@ def main() -> int:
     manifest = load_json(target / "ecosystem.json", findings)
     policy = load_json(target / "policy.json", findings)
     if manifest is not None:
+        schema = json.loads((repo_root / "schemas" / "ecosystem.schema.json").read_text())
+        validate_schema_instance(manifest, schema, "ecosystem.json", findings, args.allow_placeholders)
         validate_manifest(manifest, findings, args.allow_placeholders)
     if policy is not None:
+        schema = json.loads((repo_root / "schemas" / "policy.schema.json").read_text())
+        validate_schema_instance(policy, schema, "policy.json", findings, args.allow_placeholders)
         validate_policy(policy, findings, args.allow_placeholders)
-    manifest_name = manifest.get("name") if manifest else None
-    validate_events(target / "events.jsonl", manifest_name, findings, args.allow_placeholders)
+    event_path = target / str((manifest or {}).get("state", {}).get("event_store", "events.jsonl"))
+    # Validate each event against the declared schema as well as cross-file invariants.
+    if event_path.exists():
+        event_schema = json.loads((repo_root / "schemas" / "event.schema.json").read_text())
+        for line_number, raw in enumerate(event_path.read_text().splitlines(), 1):
+            if not raw.strip():
+                continue
+            try:
+                event_value = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            validate_schema_instance(
+                event_value, event_schema, f"events.jsonl:{line_number}", findings, args.allow_placeholders,
+            )
+    validate_events(event_path, manifest, findings, args.allow_placeholders)
 
     for message in findings.warnings:
         print(f"warning: {message}")

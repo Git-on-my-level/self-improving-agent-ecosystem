@@ -16,7 +16,7 @@ The scorer must return one structured result:
     "coverage": 0.98,
     "stddev": 0.2
   },
-  "evidence": ["results.json"],
+  "artifacts": ["results.json"],
   "note": "candidate improved the controlled measurement"
 }
 ```
@@ -41,9 +41,7 @@ must never trade away:
 - absence of evaluator tampering;
 - attribution requirements.
 
-For code that adds tests, copy the tests onto the parent revision and require
-them to fail there. This prevents a candidate from earning credit for tests
-that do not distinguish its behavior.
+For claims whose evidence is a newly added regression test, confirm that the test distinguishes the claimed behavior on the parent revision. Characterization tests, coverage additions, and refactoring safeguards do not need to fail on the parent; the evidence only needs to distinguish the improvement actually being claimed.
 
 ## Quality objective
 
@@ -87,19 +85,25 @@ claim. It must be independent from candidate editing and should test:
 
 ## Anti-Goodhart checklist
 
-Before unattended ranking, answer yes to all:
+Before unattended ranking, verify these desired invariants:
 
-- Does the objective correspond to an outcome users actually value?
-- Can the candidate increase it without improving that outcome?
-- Are numerator and denominator both candidate-controlled?
-- Is a zero or minimum denominator artificially inflating the score?
-- Can repeated or nonsubstantive actions count as progress?
-- Can an unsigned or ineligible actor impersonate a counted participant?
-- Is the measurement incremental rather than cumulative?
-- Does missing attribution fail closed?
-- Is there enough independent data to distinguish noise from improvement?
-- Does the verifier contain a fixture for every known gaming route?
-- Can a human understand why the current best beat the previous best?
+- The objective corresponds to an outcome users actually value.
+- Known ways to increase the metric without improving that outcome are gated or measured.
+- Candidate control over numerator/denominator cannot manufacture improvement.
+- Zero/minimum denominators cannot artificially inflate the score.
+- Repeated or nonsubstantive activity does not count as progress.
+- Counted actors and observations have authenticated, eligible identities.
+- Measurement is incremental when cumulative activity would confound attribution.
+- Missing attribution or incomplete evidence fails closed.
+- There is enough independent data to distinguish noise from meaningful improvement.
+- The verifier covers known gaming and confounding routes.
+- A human can reconstruct why the current best beat the previous best.
+
+### Ranking semantics
+
+A rank-mode objective must be comparable across accepted candidates under the same evaluator revision. A parent-relative delta such as `treatment - parent` is not automatically a stable ranking score: a +5 improvement after a previous +10 improvement can still be real progress. Use a stable absolute objective, or keep pairwise/discovery judgments outside the rank ratchet.
+
+Record an explicit evaluator revision (code, fixtures, data contract, and material environment assumptions) with every accepted result. When that revision changes, re-evaluate or rebaseline rather than silently comparing scores produced under different contracts.
 
 If a historical winner is invalidated, preserve the original ledger. Append an
 `evaluation_invalidated` event, state the evaluator defect, and rebaseline from

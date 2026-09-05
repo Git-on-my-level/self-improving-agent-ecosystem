@@ -36,6 +36,7 @@ Experiment:
 - `candidate_built`
 - `candidate_scored`
 - `candidate_rejected`
+- `candidate_failed`
 - `verification_failed`
 - `candidate_accepted`
 - `evaluation_invalidated`
