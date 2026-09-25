@@ -2,11 +2,12 @@
 set -eu
 
 repo="https://github.com/Git-on-my-level/avo-lite.git"
-ref="9df79c9ba33954a8e076f95b0af3028ad4666e38"
+ref=""
 prefix=".tools/avo-lite"
 
 usage() {
   echo "usage: $0 [--prefix DIR] [--ref COMMIT_OR_TAG] [--repo URL]" >&2
+  echo "Installs the latest default branch unless --ref pins a revision." >&2
 }
 
 while [ "$#" -gt 0 ]; do
@@ -30,12 +31,18 @@ cleanup() {
 }
 trap cleanup 0 HUP INT TERM
 
-git clone --filter=blob:none --no-checkout "$repo" "$tmp/repo"
-if ! git -C "$tmp/repo" fetch --depth 1 origin "$ref"; then
-  echo "unable to fetch requested AVO-lite ref: $ref" >&2
-  exit 1
+if [ -z "$ref" ]; then
+  git clone --depth 1 "$repo" "$tmp/repo"
+  source_desc="latest default branch ($(git -C "$tmp/repo" rev-parse --abbrev-ref HEAD))"
+else
+  git clone --filter=blob:none --no-checkout "$repo" "$tmp/repo"
+  if ! git -C "$tmp/repo" fetch --depth 1 origin "$ref"; then
+    echo "unable to fetch requested AVO-lite ref: $ref" >&2
+    exit 1
+  fi
+  git -C "$tmp/repo" checkout --detach FETCH_HEAD
+  source_desc="requested ref $ref"
 fi
-git -C "$tmp/repo" checkout --detach FETCH_HEAD
 actual=$(git -C "$tmp/repo" rev-parse HEAD)
 
 case "$ref" in
@@ -52,6 +59,8 @@ rmdir "$tmp"
 trap - 0 HUP INT TERM
 
 echo "Installed AVO-lite source at $prefix"
+echo "Source: $source_desc"
 echo "Revision: $actual"
+echo "Record this commit; pass --ref $actual to reproduce this install."
 echo "Inspect $prefix/README.md and $prefix/SKILL.md before execution."
 echo "Then add $prefix/scripts to PATH explicitly."

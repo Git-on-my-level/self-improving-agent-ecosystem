@@ -49,3 +49,10 @@ name the evaluator defect and affected candidates, and rebaseline from the last
 demonstrably valid candidate or freshly evaluated safe revision.
 
 Pause unattended acceptance until historical gaming fixtures fail closed.
+
+## Moving goalposts
+
+Thresholds, margins, and the acceptance rule belong to the evaluator revision.
+Change them only through a recorded rebaseline. An objective that rises by the
+same step every attempt, or an evaluator that never rejects, is a defect to
+investigate, not a success.

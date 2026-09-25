@@ -64,3 +64,60 @@ on one host. Total host or gateway failure silenced every reporter.
 
 Remedy: external deadman on a different host/provider and preferably a second
 delivery path.
+
+## Upstream merge wedged recovery
+
+A wrapper merged upstream into the task branch before each attempt. After an
+interrupted run, recovery saw a HEAD it did not expect and refused to continue
+on every later fire, while the scheduler kept reporting success.
+
+Remedy: the kernel owns upstream sync under its own lock; recovery accepts
+advancement made only of merge commits along the first parent; a refusal is a
+loud stall, not a quiet exit.
+
+## Recovery that never ran
+
+A repair job took a lock with a zero timeout. A sibling job held the lock on
+every fire, so the repair lost the race each time and exited silently.
+
+Remedy: bounded wait, record "busy" as an event, and alert when the repair
+itself has not run within its budget.
+
+## Work hosted inside a restartable gateway
+
+Long attempts ran as child processes of a chat or agent gateway. Every gateway
+restart or upgrade killed whatever attempt was in flight.
+
+Remedy: the operating-system scheduler runs attempts; gateways only notify.
+
+## Single-slot deadlock
+
+A builder paused while its own pull request was open. One unreviewed pull
+request stopped the loop for weeks, and nothing reported it as stuck.
+
+Remedy: maximum item age, escalation past the deadline, and supersession, so
+no single item can block the queue; a progress budget on the loop.
+
+## Model-summarized silence
+
+A model read a script's failure output and reported "nothing to report". The
+failure was never delivered.
+
+Remedy: parse outcomes deterministically and route failures without a model in
+the path. Models narrate; they never decide whether a failure is delivered.
+
+## Silent coverage cap
+
+A sensor paginated to a fixed item limit while the queue was much larger. A
+large fraction of items was never processed, and every run looked complete.
+
+Remedy: page to completion and export coverage (processed / total); treat
+truncation as `observed_problem`, not success.
+
+## Stale-cache digest
+
+A daily digest counted open items from a local cache and reported several times
+the real number. Readers acted on the digest, not on the provider.
+
+Remedy: reconcile against provider truth before reporting, and state the
+source and freshness of every count.

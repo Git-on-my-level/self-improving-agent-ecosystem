@@ -19,7 +19,7 @@
         "outcome_evaluated", "incident_resolved", "regression_detected",
         "candidate_quarantined", "rollback_started", "rollback_completed",
         "loop_stalled", "loop_resumed", "budget_exhausted", "deadman_missed",
-        "state_repaired"
+        "state_repaired", "human_decision_recorded", "autonomy_changed"
       ]
     },
     "occurred_at": {"type": "string", "format": "date-time"},

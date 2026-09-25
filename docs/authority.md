@@ -58,3 +58,27 @@ Require explicit human approval for:
 
 An evaluator change should be reviewed using historical winners, known gaming
 fixtures, and a rebaseline plan before unattended execution resumes.
+
+## Human decisions are the primary reward signal
+
+Approvals, rejections, overrides, and edits made before merge are labelled
+evidence about what the system should have done. Record each one as a
+`human_decision_recorded` event with the item, the decision, and the diff
+between what was proposed and what was accepted. Do not let them evaporate into
+review threads; they are the cheapest ground truth the loop will ever get, and
+they feed both evaluator fixtures and observe → propose sensors.
+
+## Autonomy is earned per class of action
+
+Expand authority for a **class** of action (for example, dependency patch
+bumps, documentation fixes, a specific alert runbook), never for the loop as a
+whole:
+
+- widen only after a sustained record of approvals without reverts or
+  post-merge edits for that class;
+- widen through an explicit, recorded ruling by the policy owner
+  (`autonomy_changed`), never by the loop inferring it from its own history;
+- contract again, automatically, after a regression, revert, or incident in
+  that class, and require a fresh record before widening again.
+
+A loop may propose that a class has earned autonomy. It may not grant it.

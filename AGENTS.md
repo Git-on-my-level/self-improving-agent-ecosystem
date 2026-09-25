@@ -8,5 +8,5 @@ changes require historical and adversarial fixtures. Promotion changes require
 exact-ref reconciliation and interrupted-transition coverage. Authority changes
 require explicit human review and may not approve themselves.
 
-Use `make check` before committing. Keep AVO-lite as an external pinned source;
+Use `make check` before committing. Keep AVO-lite as an external source;
 do not vendor its implementation into this repository.

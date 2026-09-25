@@ -109,6 +109,19 @@ If a historical winner is invalidated, preserve the original ledger. Append an
 `evaluation_invalidated` event, state the evaluator defect, and rebaseline from
 the last demonstrably valid candidate or a freshly evaluated safe revision.
 
+### Goalposts move only explicitly
+
+Acceptance semantics—thresholds, margins, rolling bars, and the ratchet rule
+itself—are part of the evaluator revision. Changing them requires an explicit,
+recorded rebaseline with a stated reason, never a silent relaxation that
+happens to turn a reject into an accept. Treat suspicious regularity as a
+defect: an objective that improves by about the same amount on every attempt,
+or an evaluator that never rejects, is measuring the loop rather than the
+outcome. AVO-lite's evaluator fingerprint and `avo rebaseline` are a reference
+implementation: when the scorer, verifier, margin, or acceptance rule changes,
+attempts stop until someone rescores the current best on purpose and the ledger
+records why.
+
 ## No-action is evidence
 
 An honest no-action result should record why:

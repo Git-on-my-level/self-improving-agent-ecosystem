@@ -14,7 +14,26 @@ helpers that future agents would otherwise have to rediscover:
 - promotion follows external Git and deployment truth;
 - post-deploy outcomes close the loop;
 - silence is classified, never assumed healthy;
+- progress is measured, not liveness: every loop declares how long it may go
+  without a meaningful transition, and something outside it alerts;
+- human decisions are labelled evidence, and autonomy is earned per class of
+  action;
 - authority, budgets, rollback, and human gates are explicit.
+
+## Choose your loop
+
+Three [loop archetypes](docs/loop-archetypes.md) share the same planes:
+
+- **optimize** — rank candidates against a scalar objective behind a hard
+  correctness gate (an AVO-lite style ratchet).
+- **maintain** — drain a work queue (issues, pull requests, dependency updates,
+  alerts) through triage, candidate, review, publish, merge, and outcome check,
+  under a WIP limit and a maximum item age. Most deployments start here.
+- **observe → propose** — sensors turn telemetry, usage traces, transcripts,
+  and human decisions into proposals, never code.
+
+They compose: observe → propose feeds a maintain queue, and a maintain loop can
+run optimize on any item that has a scorer. Start with one.
 
 ## Architecture in one picture
 
@@ -47,6 +66,7 @@ The reference architecture has four deliberately separate planes:
 
 ## Start here
 
+- [Loop archetypes](docs/loop-archetypes.md)
 - [Architecture](docs/architecture.md)
 - [Evaluator contract](docs/evaluator-contract.md)
 - [Event and state model](docs/event-model.md)
@@ -69,7 +89,7 @@ only the Python standard library.
 git clone https://github.com/Git-on-my-level/self-improving-agent-ecosystem.git
 cd self-improving-agent-ecosystem
 
-# Optional: install the known AVO-lite revision without executing it.
+# Optional: fetch AVO-lite source without executing it (latest by default).
 ./scripts/install-avo-lite.sh --prefix .tools/avo-lite
 
 # Create a small local scaffold from the public templates.
@@ -83,9 +103,10 @@ Choose `local`, `project`, or `live` when scaffolding. The profiles share one ar
 
 The generated commands still fail closed until real sensors/adapters are configured.
 
-The AVO-lite installer defaults to a reviewed commit rather than a moving
-branch. Inspect the checkout and its current documentation before running it.
-The canonical upstream is <https://github.com/Git-on-my-level/avo-lite>.
+The AVO-lite installer fetches the latest default branch and prints the exact
+commit it installed; pass `--ref REF` to pin. Either way, inspect the checkout
+and its documentation before running it, and record the commit you run. The
+canonical upstream is <https://github.com/Git-on-my-level/avo-lite>.
 
 ## What belongs in the baseline
 
@@ -123,7 +144,7 @@ docs/       Human architecture and operating guides
 schemas/    JSON Schemas for manifests, policy, and events
 templates/  Copyable ecosystem skeleton
 examples/   Small evaluator and verifier examples
-scripts/    Zero-dependency installer, scaffold, validator, and AVO event bridge
+scripts/    Zero-dependency installer, scaffold, validator, progress check, and AVO event bridge
 skills/     Portable agent skill and focused references
 tests/      Contract tests and reward-hacking regression fixtures
 ```

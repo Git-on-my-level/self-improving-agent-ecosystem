@@ -7,11 +7,11 @@ credentials, outcome evaluation, and rollback remain outside the kernel.
 
 Canonical repository: <https://github.com/Git-on-my-level/avo-lite>
 
-## Pinned source installer
+## Source installer
 
-`scripts/install-avo-lite.sh` clones source at an explicit revision and does
-not execute it, add it to `PATH`, or modify a project. The default revision is
-recorded in the script. To install another reviewed commit:
+`scripts/install-avo-lite.sh` clones the latest default branch and does not
+execute it, add it to `PATH`, or modify a project. It prints the exact commit it
+installed. To pin a reviewed commit or tag instead:
 
 ```bash
 ./scripts/install-avo-lite.sh \
@@ -23,24 +23,28 @@ After installation:
 
 1. Inspect that revision's `README.md`, `SKILL.md`, scorer contract, and agent
    adapter guidance.
-2. Verify Git status and the exact commit.
+2. Record the exact commit you will run; unattended jobs should run a known
+   commit, whichever way it was chosen.
 3. Add its `scripts/` directory to `PATH` explicitly for the intended job.
 4. Keep agent CLI routing in an adapter; AVO remains acceptance authority.
 5. Do not give AVO implicit permission to publish, deploy, or alter credentials.
 
-## Pin updates
+To upgrade, install into a new prefix, review the upstream diff, run AVO's
+tests and one isolated reject/accept/interruption fixture, then switch the job
+to the new path. Keep the old checkout until the new one has run cleanly.
 
-An update to the default pin should include:
+## Kernel features the ecosystem relies on
 
-- old and new exact commits;
-- upstream diff review;
-- AVO unit tests;
-- one isolated reject, accept, verifier-failure, interruption, and recovery
-  fixture;
-- compatibility evidence for the ecosystem adapter;
-- rollback to the old source checkout.
-
-Avoid a moving `main` checkout in unattended scheduler configuration.
+- **`avo sync <ref>`** — follow a moving upstream. The kernel merges under its
+  own task lock, records the merge in lineage, and aborts cleanly on conflict.
+  Do not merge upstream in a wrapper behind the kernel's back.
+- **Evaluator revision and `avo rebaseline`** — the scorer, verifier, margin,
+  and acceptance rule are fingerprinted. A change blocks attempts until an
+  explicit rebaseline rescores the current best and records why. See
+  [goalposts move only explicitly](evaluator-contract.md#goalposts-move-only-explicitly).
+- **`avo status --json`** — the health export. Feed `last_accept_at`, active run
+  age, and evaluator drift to an external monitor; alert on progress, not on
+  the scheduler succeeding.
 
 ## Event bridge
 

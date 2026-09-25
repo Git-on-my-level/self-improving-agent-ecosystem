@@ -93,6 +93,7 @@
         "human_gate_before": "production"
       },
       "authority": "propose",
+      "progress_budget_seconds": 604800,
       "budgets": {
         "max_attempts_per_day": 8,
         "max_cost_per_day": 10,
@@ -111,6 +112,7 @@
     "deadman": "declare-external-observer-before-unattended-use",
     "required_fields": [
       "last_attempt",
+      "last_progress",
       "last_valid_evaluation",
       "status",
       "stall_count",

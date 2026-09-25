@@ -1,9 +1,24 @@
 # Adoption Guide
 
+## Adoption levels
+
+Nobody adopts everything on day one. Each level is useful on its own; climb
+only when the level below is boring.
+
+| Level | Add | What it buys |
+| --- | --- | --- |
+| L0 | Health export: each loop reports its last attempt and last meaningful progress | A stuck loop is visible instead of silently "running" |
+| L1 | Append-only event log | Every decision and failure is reconstructable |
+| L2 | Evaluator separated from builder, with adversarial verification | The loop cannot grade its own work |
+| L3 | Promotion state machine, outcome verification, and an external deadman | Accepted work provably ships and provably helps |
+
 ## 1. Choose one bounded loop
 
-Start with a task that has a repeatable mechanical evaluator. Avoid combining
-monitoring, product changes, deployment, and policy mutation in the first loop.
+Pick an [archetype](loop-archetypes.md) first: most teams start with
+*maintain* on an existing queue. For *optimize*, start with a task that has a
+repeatable mechanical evaluator. Avoid combining monitoring, product changes,
+deployment, and policy mutation in the first loop. Declare its progress budget
+before it runs.
 
 Good first candidates:
 
@@ -26,8 +41,8 @@ after evidence supports it.
 
 ## 4. Initialize AVO-lite
 
-Use an existing reviewed installation or the explicit pinned installer in this
-repository. Read the installed revision's README and `SKILL.md`. Configure an
+Use an existing reviewed installation or the installer in this repository,
+and record the exact commit you run. Read the installed revision's README and `SKILL.md`. Configure an
 agent adapter, scorer, and adversarial verifier. Keep publication and
 deployment outside the AVO kernel.
 
@@ -51,14 +66,17 @@ rollback—not just the happy path.
 
 ## 8. Earn additional authority
 
-Expand one capability at a time after a review window. Good evidence includes:
+Expand one capability, for one class of action, at a time after a review
+window, through a recorded ruling (see [authority](authority.md#autonomy-is-earned-per-class-of-action)).
+Good evidence includes:
 
 - replayable evaluation;
 - several valid accepts and honest rejects;
 - no shared-checkout or state-reconciliation failures;
 - complete promotion lineage;
 - successful canary and rollback drills;
-- bounded cost and understandable alerts.
+- bounded cost and understandable alerts;
+- a sustained run of human approvals without reverts or edits for that class.
 
 ## Exit criteria for a reusable ecosystem
 

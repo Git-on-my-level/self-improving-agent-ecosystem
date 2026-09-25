@@ -256,6 +256,11 @@
             },
             "additionalProperties": false
           },
+          "progress_budget_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum time without a meaningful transition (accepted candidate, resolved item, verified outcome, reasoned no-action) before an external monitor alerts."
+          },
           "authority": {
             "enum": [
               "observe",

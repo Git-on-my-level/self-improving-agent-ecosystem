@@ -111,6 +111,31 @@ class ValidateTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertTrue((target / "MISSION.md").exists())
 
+    def test_live_loop_without_progress_budget_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = self.initialized(pathlib.Path(tmp))
+            path = target / "ecosystem.json"
+            data = json.loads(path.read_text())
+            data["profile"] = "live"
+            del data["loops"][0]["progress_budget_seconds"]
+            path.write_text(json.dumps(data))
+            result = subprocess.run([sys.executable, str(VALIDATOR), str(target)], text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("progress_budget_seconds", result.stderr)
+
+    def test_human_decision_event_is_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = self.initialized(pathlib.Path(tmp))
+            event_path = target / "events.jsonl"
+            event = json.loads(event_path.read_text())
+            event.update({"event_id": "decision-0001", "type": "human_decision_recorded",
+                          "candidate_id": "candidate-1", "idempotency_key": "decision:candidate-1"})
+            event["authority"].update({"level": "publish", "decision": "approved_by_human", "approver": "reviewer"})
+            event["result"].update({"reason": "approved with edits"})
+            event_path.write_text(json.dumps(event) + "\n")
+            result = subprocess.run([sys.executable, str(VALIDATOR), str(target)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
     def test_avo_bridge_emits_valid_idempotent_accept_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)

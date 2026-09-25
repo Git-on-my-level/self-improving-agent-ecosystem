@@ -24,7 +24,7 @@ EVENT_TYPES = {
     "outcome_evaluated", "incident_resolved", "regression_detected",
     "candidate_quarantined", "rollback_started", "rollback_completed",
     "loop_stalled", "loop_resumed", "budget_exhausted", "deadman_missed",
-    "state_repaired",
+    "state_repaired", "human_decision_recorded", "autonomy_changed",
 }
 CANDIDATE_EVENTS = {
     name for name in EVENT_TYPES
@@ -220,6 +220,9 @@ def validate_manifest(data: dict[str, Any], findings: Findings, allow_placeholde
         budgets = loop.get("budgets")
         if not isinstance(budgets, dict) or "max_cost_per_day" not in budgets:
             findings.error(f"{prefix} must declare attempt and cost budgets")
+        if "progress_budget_seconds" not in loop:
+            message = f"{prefix} declares no progress_budget_seconds; liveness alone cannot detect a stuck loop"
+            findings.error(message) if data.get("profile") == "live" else findings.warn(message)
         authority = loop.get("authority")
         if authority in {"publish", "stage", "promote"} and not loop.get("promotion"):
             findings.error(f"{prefix} has {authority} authority without a promotion contract")

@@ -31,7 +31,8 @@
 - Dry-run promotion against exact remote refs.
 - Verify accepted, promoted, deployed, and serving revisions.
 - Exercise no-action, observer-failed, stale, quarantined, and rollback states.
-- Confirm external health sees a missed heartbeat.
+- Confirm external health sees a missed heartbeat and a blown progress budget
+  (for example with `scripts/progress-check.py`).
 - Check that logs, diffs, fixtures, and Git remotes contain no secrets.
 
 ## Handoff

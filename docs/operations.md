@@ -7,6 +7,27 @@ checks directly under the operating-system scheduler. Invoke an LLM only when
 the task requires judgment or synthesis. A provider outage should not prevent
 the system from noticing that the provider or scheduler is down.
 
+## Progress, not liveness
+
+A scheduler that fires on time proves only that it fired. Every loop declares a
+**progress budget**: the maximum time it may go without a meaningful
+transition. Meaningful means the loop's own unit of progress, for example:
+
+- an accepted candidate;
+- a merged, resolved, or explicitly superseded work item;
+- a verified outcome;
+- an honest, reasoned `no_action` when the loop has nothing to do.
+
+Attempts, retries, scheduler exits, and log lines do not count. Declare the
+budget per loop (`progress_budget_seconds` in `ecosystem.json`) and have a
+monitor outside the loop alert when it is exceeded. A loop that is running but
+stuck is a failure, not a quiet day.
+
+`scripts/progress-check.py` is a minimal reference monitor: it reads the event
+log and the manifest and lists loops whose last meaningful transition is older
+than their budget (exit 0 healthy, 1 stale, 2 error). Run it from a different
+process or host than the loop it checks.
+
 ## Required health export
 
 For each loop, expose:
@@ -15,6 +36,7 @@ For each loop, expose:
 - last completed attempt;
 - last valid evaluation;
 - last accepted candidate;
+- last meaningful progress and the declared progress budget;
 - current action and status;
 - consecutive errors and stall count;
 - active lock age;

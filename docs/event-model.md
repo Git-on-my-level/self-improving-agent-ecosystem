@@ -46,6 +46,10 @@ Promotion:
 
 - `approval_requested`
 - `approval_granted`
+- `human_decision_recorded` — approval, rejection, override, or edit before
+  merge; labelled evidence, not just a gate
+- `autonomy_changed` — recorded ruling widening or contracting authority for
+  one class of action
 - `promotion_started`
 - `promotion_reconciled`
 - `promotion_failed`
