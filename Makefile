@@ -5,6 +5,7 @@ check: validate test shellcheck
 validate:
 	python3 scripts/validate.py --allow-placeholders templates
 	python3 -m compileall -q scripts examples tests
+	python3 scripts/loop validate templates/loop-manifest.example.json
 
 test:
 	python3 -m unittest discover -s tests -v

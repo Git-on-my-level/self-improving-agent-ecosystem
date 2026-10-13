@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""loop — tick runner and status collector for lite loop manifests.
+
+The loop standard: every self-improving loop proves its effect. Each tick of a
+loop ends with ONE receipt line on stdout:
+
+    LOOP_RECEIPT {"loop":"<id>","run":"<iso8601>","outcome":"acted|measured|no_op|infra_error",
+                  "effects":[{"ref":"<url>","metric_before":n|null,"metric_after":n|null}],
+                  "open_items":n,"oldest_open_days":n,"preflight":{"<bin>":true}}
+
+The runner is the ledger writer. It captures the receipt, appends it to the
+manifest's durable JSONL ledger, and computes progress (`last_effect_at`) and
+stall state against the manifest's progress budget.
+
+Transitional compatibility: some loops append their own receipt to the ledger
+and print nothing on healthy ticks (their stdout is a chat delivery payload).
+For those the runner falls back to the newest ledger row written during this
+tick's window and does not double-append. New loops should print the receipt;
+stdout is the contract. A loop that prints nothing AND writes no fresh ledger
+row is `infra_error` — exit 0 is never evidence of a healthy tick.
+
+Usage:
+    loop tick <manifest> -- <cmd...>   Run one tick of the loop.
+    loop tick <manifest>               Use the manifest's own "command".
+    loop status <manifest...>          Print one JSON object per loop (JSONL).
+    loop validate <manifest...>        Structural check of manifests.
+
+Exit codes (tick): 0 healthy tick (any outcome except infra_error); 6 a
+`requires` binary is missing (nothing ran); 5 infra_error (missing/invalid
+receipt, nonzero exit). Stalled loops still exit 0 — the escalation line
+LOOP_STALLED on stdout is the page, and it fires once per stall transition.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+RECEIPT_PREFIX = "LOOP_RECEIPT "
+STALL_PREFIX = "LOOP_STALLED "
+OUTCOMES = ("acted", "measured", "no_op", "infra_error")
+ARCHETYPES = ("optimize", "maintain", "observe_propose")
+AUTHORITIES = ("propose", "pr", "merge", "deploy")
+EFFECT_OUTCOMES = ("acted", "measured")
+SCHEMA_VERSION = 1
+EXIT_OK = 0
+EXIT_INFRA = 5
+EXIT_MISSING_BIN = 6
+EXIT_MANIFEST = 7
+# A receipt found in the ledger counts as "this tick" if written after the
+# runner started, minus a small grace for clock skew.
+TICK_WINDOW_SLACK_S = 5.0
+
+
+def parse_time(value):
+    """Parse ISO-8601 to aware UTC datetime; None on failure."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def iso_now():
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+# ---------------------------------------------------------------- manifests
+
+
+def load_manifest(path):
+    """Read and structurally validate a lite manifest. Returns (data, errors)."""
+    errors = []
+    try:
+        raw = pathlib.Path(os.path.expanduser(str(path))).read_text()
+        data = json.loads(raw)
+    except (OSError, ValueError) as exc:
+        return None, [f"cannot read manifest: {exc}"]
+    if not isinstance(data, dict):
+        return None, ["manifest is not a JSON object"]
+
+    def req(field, types, extra=None):
+        value = data.get(field)
+        if isinstance(value, bool) and bool not in (types if isinstance(types, tuple) else (types,)):
+            errors.append(f"{field}: must be {extra or types}, got boolean")
+        elif not isinstance(value, types if isinstance(types, tuple) else (types,)):
+            errors.append(f"{field}: missing or wrong type (want {extra or types})")
+        elif extra == "nonempty" and isinstance(value, str) and not value.strip():
+            errors.append(f"{field}: must be a nonempty string")
+        return value
+
+    req("schema_version", int)
+    loop = req("loop", str, "nonempty")
+    if isinstance(loop, str) and not loop.replace("-", "").replace("_", "").isalnum():
+        errors.append("loop: use [a-z0-9-_] identifiers")
+    req("host", str, "nonempty")
+    if data.get("archetype") not in ARCHETYPES:
+        errors.append(f"archetype: must be one of {', '.join(ARCHETYPES)}")
+    req("goal_metric", str, "nonempty")
+    if data.get("authority") not in AUTHORITIES:
+        errors.append(f"authority: must be one of {', '.join(AUTHORITIES)}")
+    ledger = req("ledger", str, "nonempty")
+    if isinstance(ledger, str):
+        expanded = os.path.expanduser(ledger)
+        if "/Volumes/" in expanded and "scratch" in expanded.lower():
+            errors.append("ledger: durable paths only, never an ephemeral scratch volume")
+        if not expanded.endswith(".jsonl"):
+            errors.append("ledger: must point to a .jsonl file")
+    budget = data.get("progress_budget_seconds")
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+        errors.append("progress_budget_seconds: must be a positive integer")
+    req("stop_rule", str, "nonempty")
+    requires = data.get("requires", [])
+    if not isinstance(requires, list) or not all(isinstance(b, str) and b for b in requires):
+        errors.append("requires: must be a list of binary names")
+    for field in ("effect_probe", "finisher"):
+        value = data.get(field, "")
+        if not isinstance(value, str):
+            errors.append(f"{field}: must be a string (empty when not yet defined)")
+    command = data.get("command")
+    if command is not None and (
+        not isinstance(command, list) or not command or not all(isinstance(a, str) for a in command)
+    ):
+        errors.append("command: must be a nonempty list of strings (used by `loop tick <manifest>`)")
+    return data, errors
+
+
+def expand_ledger(manifest):
+    return pathlib.Path(os.path.expanduser(manifest["ledger"]))
+
+
+# ---------------------------------------------------------------- receipts
+
+
+def extract_receipt(stdout_text):
+    """Return the last valid receipt dict from stdout, or (None, reason)."""
+    found = None
+    reason = "no LOOP_RECEIPT line on stdout"
+    for line in stdout_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(RECEIPT_PREFIX):
+            continue
+        payload = stripped[len(RECEIPT_PREFIX):].strip()
+        receipt, problem = validate_receipt(payload)
+        if receipt is not None:
+            found = receipt
+            reason = None
+        else:
+            reason = f"invalid LOOP_RECEIPT: {problem}"
+    return found, reason
+
+
+def validate_receipt(payload):
+    try:
+        receipt = json.loads(payload)
+    except ValueError as exc:
+        return None, f"not JSON ({exc})"
+    if not isinstance(receipt, dict):
+        return None, "receipt is not a JSON object"
+    if receipt.get("loop") and not isinstance(receipt["loop"], str):
+        return None, "loop must be a string"
+    if parse_time(receipt.get("run")) is None:
+        return None, "run is missing or not ISO-8601"
+    if receipt.get("outcome") not in OUTCOMES:
+        return None, f"outcome must be one of {', '.join(OUTCOMES)}"
+    effects = receipt.get("effects", [])
+    if not isinstance(effects, list):
+        return None, "effects must be a list"
+    for effect in effects:
+        if not isinstance(effect, dict) or not isinstance(effect.get("ref"), str) or not effect["ref"]:
+            return None, "each effect needs a nonempty ref string"
+        for side in ("metric_before", "metric_after"):
+            if side in effect and effect[side] is not None and (
+                isinstance(effect[side], bool) or not isinstance(effect[side], (int, float))
+            ):
+                return None, f"{side} must be a number or null"
+    preflight = receipt.get("preflight", {})
+    if not isinstance(preflight, dict):
+        return None, "preflight must be an object"
+    return receipt, None
+
+
+def has_effects(receipt):
+    return receipt.get("outcome") in EFFECT_OUTCOMES and bool(receipt.get("effects"))
+
+
+def read_ledger(ledger_path):
+    """Parse a JSONL ledger of receipts; skip corrupt rows. (rows, corrupt_count)."""
+    rows = []
+    corrupt = 0
+    try:
+        text = ledger_path.read_text()
+    except OSError:
+        return rows, corrupt
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        payload = line[len(RECEIPT_PREFIX):] if line.startswith(RECEIPT_PREFIX) else line
+        receipt, problem = validate_receipt(payload)
+        if receipt is None:
+            corrupt += 1
+            continue
+        rows.append(receipt)
+    return rows, corrupt
+
+
+def append_receipt(ledger_path, receipt):
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    line = RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":"), sort_keys=False)
+    with ledger_path.open("a") as handle:
+        handle.write(line + "\n")
+
+
+# ---------------------------------------------------------------- preflight
+
+
+def missing_binaries(names):
+    path_dirs = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    missing = []
+    for name in names:
+        if not any(os.access(os.path.join(d, name), os.X_OK) for d in path_dirs):
+            missing.append(name)
+    return missing
+
+
+# ---------------------------------------------------------------- stall
+
+
+def compute_state(rows, budget_seconds, now=None):
+    """Collector state from ledger rows. rows must be in ledger (append) order."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    last_run = None
+    last_outcome = None
+    last_effect_at = None
+    effects_7d = 0
+    fail_streak = 0
+    for receipt in rows:
+        at = parse_time(receipt.get("run"))
+        if at is None:
+            continue
+        if last_run is None or at >= parse_time(last_run):
+            last_run = receipt["run"]
+            last_outcome = receipt.get("outcome")
+        if has_effects(receipt):
+            if last_effect_at is None or at > parse_time(last_effect_at):
+                last_effect_at = receipt["run"]
+            if now - at <= dt.timedelta(days=7):
+                effects_7d += len(receipt.get("effects") or [])
+    for receipt in reversed(rows):
+        if receipt.get("outcome") == "infra_error":
+            fail_streak += 1
+        else:
+            break
+    effect_age = None
+    if last_effect_at is not None:
+        effect_age = (now - parse_time(last_effect_at)).total_seconds()
+    stalled = effect_age is None or effect_age > budget_seconds
+    return {
+        "last_run": last_run,
+        "last_outcome": last_outcome,
+        "last_effect_at": last_effect_at,
+        "effects_7d": effects_7d,
+        "fail_streak": fail_streak,
+        "stalled": stalled,
+    }
+
+
+def stall_state_path(ledger_path):
+    return ledger_path.with_name(ledger_path.stem + ".stall.json")
+
+
+def read_stall_state(ledger_path):
+    try:
+        data = json.loads(stall_state_path(ledger_path).read_text())
+        if isinstance(data, dict) and isinstance(data.get("stalled"), bool):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {"stalled": False, "escalated_at": None}
+
+
+def write_stall_state(ledger_path, stalled):
+    path = stall_state_path(ledger_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"stalled": stalled, "escalated_at": iso_now()}) + "\n")
+
+
+# ---------------------------------------------------------------- commands
+
+
+def cmd_tick(argv):
+    if not argv:
+        print("usage: loop tick <manifest> -- <cmd...>", file=sys.stderr)
+        return EXIT_MANIFEST
+    manifest_path = argv[0]
+    rest = argv[1:]
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    manifest, errors = load_manifest(manifest_path)
+    if errors:
+        for error in errors:
+            print(f"manifest error: {error}", file=sys.stderr)
+        return EXIT_MANIFEST
+    command = rest or manifest.get("command")
+    if not command:
+        print("no command: pass `-- <cmd...>` or set \"command\" in the manifest", file=sys.stderr)
+        return EXIT_MANIFEST
+
+    print(f"PATH={os.environ.get('PATH', '')}")
+    missing = missing_binaries(manifest.get("requires", []))
+    ledger = expand_ledger(manifest)
+    if missing:
+        print(f"preflight FAILED: required binaries not on PATH: {', '.join(missing)}", file=sys.stderr)
+        receipt = synth_receipt(manifest, "infra_error",
+                                f"missing binaries: {', '.join(missing)}", missing)
+        append_receipt(ledger, receipt)
+        print(RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":")))
+        return EXIT_MISSING_BIN
+
+    started = dt.datetime.now(dt.timezone.utc)
+    try:
+        proc = subprocess.run(command, capture_output=True, text=True)
+        stdout, returncode = proc.stdout, proc.returncode
+    except OSError as exc:
+        print(f"failed to start command: {exc}", file=sys.stderr)
+        receipt = synth_receipt(manifest, "infra_error", f"failed to start: {exc}", [])
+        append_receipt(ledger, receipt)
+        print(RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":")))
+        return EXIT_INFRA
+
+    receipt, problem = extract_receipt(stdout)
+    if receipt is not None:
+        rows, _ = read_ledger(ledger)
+        tail = rows[-1] if rows else None
+        if tail and tail.get("run") == receipt.get("run") and tail.get("loop") == receipt.get("loop"):
+            pass  # the loop already appended its own receipt; never double-write
+        else:
+            receipt.setdefault("loop", manifest["loop"])
+            append_receipt(ledger, receipt)
+    else:
+        # Transitional fallback: healthy silent loops that self-append (their
+        # stdout is the chat payload). Accept their fresh ledger row instead.
+        rows, _ = read_ledger(ledger)
+        fallback = None
+        if rows:
+            candidate = rows[-1]
+            at = parse_time(candidate.get("run"))
+            if at is not None and at >= started - dt.timedelta(seconds=TICK_WINDOW_SLACK_S):
+                fallback = candidate
+        if fallback is not None and returncode == 0:
+            receipt = fallback
+        else:
+            reason = problem if problem != "no LOOP_RECEIPT line on stdout" else "no receipt and no fresh ledger row"
+            if returncode != 0:
+                reason = f"exit {returncode}: {reason}"
+            print(f"infra_error: {reason}", file=sys.stderr)
+            if stdout.strip():
+                sys.stdout.write(stdout)
+            receipt = synth_receipt(manifest, "infra_error", reason, [])
+            append_receipt(ledger, receipt)
+            return EXIT_INFRA
+
+    # Stall bookkeeping against the whole ledger.
+    rows, _ = read_ledger(ledger)
+    state = compute_state(rows, manifest["progress_budget_seconds"])
+    previous = read_stall_state(ledger)
+    if state["stalled"] and not previous.get("stalled"):
+        age = "never" if state["last_effect_at"] is None else state["last_effect_at"]
+        print(
+            f"{STALL_PREFIX}loop={manifest['loop']} last_effect_at={age} "
+            f"progress_budget_seconds={manifest['progress_budget_seconds']} "
+            f"stop_rule: {manifest['stop_rule']}"
+        )
+    write_stall_state(ledger, state["stalled"])
+
+    if receipt.get("outcome") == "infra_error" or returncode != 0:
+        return EXIT_INFRA
+    return EXIT_OK
+
+
+def synth_receipt(manifest, outcome, detail, missing):
+    receipt = {
+        "loop": manifest["loop"],
+        "run": iso_now(),
+        "outcome": outcome,
+        "effects": [],
+        "open_items": 0,
+        "oldest_open_days": 0,
+        "preflight": {b: (b not in missing) for b in manifest.get("requires", [])},
+    }
+    if detail:
+        receipt["error"] = detail
+    return receipt
+
+
+def cmd_status(argv):
+    if not argv:
+        print("usage: loop status <manifest...>", file=sys.stderr)
+        return EXIT_MANIFEST
+    failed = False
+    for manifest_path in argv:
+        manifest, errors = load_manifest(manifest_path)
+        if errors:
+            print(json.dumps({"manifest": str(pathlib.Path(manifest_path).resolve()),
+                              "error": "; ".join(errors)}))
+            failed = True
+            continue
+        rows, corrupt = read_ledger(expand_ledger(manifest))
+        state = compute_state(rows, manifest["progress_budget_seconds"])
+        record = {
+            "loop": manifest["loop"],
+            "manifest": str(pathlib.Path(os.path.expanduser(str(manifest_path))).resolve()),
+            "archetype": manifest["archetype"],
+        }
+        record.update(state)
+        if corrupt:
+            record["corrupt_rows"] = corrupt
+        print(json.dumps(record))
+    return 1 if failed else 0
+
+
+def cmd_validate(argv):
+    if not argv:
+        print("usage: loop validate <manifest...>", file=sys.stderr)
+        return EXIT_MANIFEST
+    failed = False
+    for manifest_path in argv:
+        _, errors = load_manifest(manifest_path)
+        if errors:
+            for error in errors:
+                print(f"INVALID {manifest_path}: {error}", file=sys.stderr)
+            failed = True
+        else:
+            print(f"ok {manifest_path}")
+    return 1 if failed else 0
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return EXIT_MANIFEST if not argv else EXIT_OK
+    handler = {"tick": cmd_tick, "status": cmd_status, "validate": cmd_validate}.get(argv[0])
+    if handler is None:
+        print(f"unknown command: {argv[0]}", file=sys.stderr)
+        print(__doc__)
+        return EXIT_MANIFEST
+    return handler(argv[1:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
