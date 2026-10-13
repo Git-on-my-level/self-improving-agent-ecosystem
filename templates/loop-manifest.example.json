@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/loop-manifest.schema.json",
+  "schema_version": 1,
+  "loop": "docs-ci-watch",
+  "host": "docs-ci-runner",
+  "archetype": "maintain",
+  "goal_metric": "median minutes from red docs CI to green",
+  "authority": "pr",
+  "ledger": "~/.hermes/state/loops/docs-ci-watch/receipts.jsonl",
+  "effect_probe": "after each merged fix, re-read the workflow's last-run conclusion; put conclusion_before/after in the next receipt's effects",
+  "finisher": "docs CI green again, or the failure triaged as infra and escalated to the platform queue",
+  "progress_budget_seconds": 259200,
+  "stop_rule": "14 days with no accepted fix and no measured improvement -> pause and ask the owner to retire the loop",
+  "requires": ["git"],
+  "cron": "example: the scheduler that fires this every 30 minutes",
+  "notes": "Generic adoptable example. Copy, rename, point ledger at your durable state, then wrap your existing tick: loop tick this.json -- /path/to/existing-tick.sh"
+}

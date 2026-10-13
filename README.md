@@ -74,6 +74,7 @@ The reference architecture has four deliberately separate planes:
 - [Operations and observability](docs/operations.md)
 - [Authority and security](docs/authority.md)
 - [Adoption guide](docs/adoption-guide.md)
+- [Lite adoption: make an existing loop provable](docs/adoption-lite.md)
 - [Failure patterns](docs/failure-patterns.md)
 - [AVO-lite integration](docs/avo-lite.md)
 

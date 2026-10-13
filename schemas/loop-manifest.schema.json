@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/loop-manifest.schema.json",
+  "title": "Lite loop manifest",
+  "description": "The minimal contract that makes an existing cron loop provable: one archetype, one goal metric, one receipt per tick, a durable ledger, and a progress budget. Roles, identities, and the full ecosystem.json planes stay optional.",
+  "type": "object",
+  "required": ["schema_version", "loop", "host", "archetype", "goal_metric", "authority", "ledger", "progress_budget_seconds", "stop_rule"],
+  "additionalProperties": true,
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "loop": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{1,62}$",
+      "description": "Stable loop id; matches the \"loop\" field of every LOOP_RECEIPT it emits."
+    },
+    "host": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human host name running this loop (e.g. the hostctl-config hosts/ entry). Manifests in a shared registry are per-host."
+    },
+    "archetype": {
+      "enum": ["optimize", "maintain", "observe_propose"],
+      "description": "optimize = hill-climb against a scalar objective; maintain = drain a work queue; observe_propose = sensors turn signals into proposals, never code."
+    },
+    "goal_metric": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The measurable goal this loop claims to move — not the work it does. Receipt effects must reference it."
+    },
+    "authority": {
+      "enum": ["propose", "pr", "merge", "deploy"],
+      "description": "Highest-privilege action the loop may take without a fresh human approval."
+    },
+    "ledger": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\.jsonl$",
+      "description": "Durable receipts JSONL. Never on an ephemeral scratch volume."
+    },
+    "effect_probe": {
+      "type": "string",
+      "description": "How the loop re-measures goal_metric after a change ships (command, query, or doc pointer). Empty string when not yet defined."
+    },
+    "finisher": {
+      "type": "string",
+      "description": "The stage that closes a work item (merge, resolve, supersede, or an explicit escalation). Empty string when not yet defined."
+    },
+    "progress_budget_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How long the loop may go without a receipt with outcome acted|measured and nonempty effects before it is stalled."
+    },
+    "stop_rule": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The condition under which the loop stops itself or asks a human to retire it. A loop without a stop rule never earns autonomy."
+    },
+    "requires": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "description": "Binaries that must be on PATH for the tick to run. The runner fails loudly (exit 6) instead of letting the loop silently no-op."
+    },
+    "command": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1,
+      "description": "Optional default tick command so `loop tick <manifest>` works without `--`."
+    },
+    "cron": {
+      "type": "string",
+      "description": "Advisory back-pointer to the cron/launchd schedule that drives this loop (job id or expression). Not interpreted by the runner."
+    },
+    "notes": {"type": "string"}
+  }
+}

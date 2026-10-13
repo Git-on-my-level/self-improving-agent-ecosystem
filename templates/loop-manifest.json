@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/loop-manifest.schema.json",
+  "schema_version": 1,
+  "loop": "__LOOP_ID__",
+  "host": "__HOST_NAME__",
+  "archetype": "maintain",
+  "goal_metric": "the number this loop exists to move, e.g. 'prod error rate for group X' — not the work it does",
+  "authority": "propose",
+  "ledger": "~/.hermes/state/loops/__LOOP_ID__/receipts.jsonl",
+  "effect_probe": "how goal_metric is re-measured after a change ships (query or command); '' while undefined",
+  "finisher": "what closes a work item: merge, resolve, supersede, or escalate; '' while undefined",
+  "progress_budget_seconds": 604800,
+  "stop_rule": "when to stop or ask a human, e.g. '3 consecutive stalled escalations with no accepted change -> pause and page'",
+  "requires": ["git"],
+  "command": null,
+  "cron": "the hermes cron job id that drives this loop",
+  "notes": "Delete null/'' fields you have not filled in. Adopt an existing cron in one file: point ledger at durable state, list the binaries, wrap the cron's command with: loop tick <this-file> -- <cmd...>"
+}
