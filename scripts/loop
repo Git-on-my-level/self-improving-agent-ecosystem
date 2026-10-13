@@ -10,7 +10,10 @@ loop ends with ONE receipt line on stdout:
 
 The runner is the ledger writer. It captures the receipt, appends it to the
 manifest's durable JSONL ledger, and computes progress (`last_effect_at`) and
-stall state against the manifest's progress budget.
+stall state against the manifest's progress budget. The child's stdout is
+forwarded verbatim on the runner's stdout — for no-agent cron jobs that stdout
+is the chat delivery payload — and the runner's own bookkeeping (the PATH it
+saw, stall escalations) goes to stderr so a healthy silent tick stays silent.
 
 Transitional compatibility: some loops append their own receipt to the ledger
 and print nothing on healthy ticks (their stdout is a chat delivery payload).
@@ -315,7 +318,7 @@ def cmd_tick(argv):
         print("no command: pass `-- <cmd...>` or set \"command\" in the manifest", file=sys.stderr)
         return EXIT_MANIFEST
 
-    print(f"PATH={os.environ.get('PATH', '')}")
+    print(f"PATH={os.environ.get('PATH', '')}", file=sys.stderr)
     missing = missing_binaries(manifest.get("requires", []))
     ledger = expand_ledger(manifest)
     if missing:
@@ -336,6 +339,13 @@ def cmd_tick(argv):
         append_receipt(ledger, receipt)
         print(RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":")))
         return EXIT_INFRA
+
+    # Forward the child's stdout verbatim: for no-agent cron jobs it IS the
+    # chat delivery payload; for agent jobs the receipt line below rides along
+    # and Hermes strips it.
+    if stdout:
+        sys.stdout.write(stdout)
+        sys.stdout.flush()
 
     receipt, problem = extract_receipt(stdout)
     if receipt is not None:
@@ -363,8 +373,6 @@ def cmd_tick(argv):
             if returncode != 0:
                 reason = f"exit {returncode}: {reason}"
             print(f"infra_error: {reason}", file=sys.stderr)
-            if stdout.strip():
-                sys.stdout.write(stdout)
             receipt = synth_receipt(manifest, "infra_error", reason, [])
             append_receipt(ledger, receipt)
             return EXIT_INFRA

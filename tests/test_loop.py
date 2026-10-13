@@ -249,7 +249,16 @@ class TickOutcomeTests(unittest.TestCase):
         rows = self.ledger_lines()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["outcome"], "acted")
-        self.assertIn("PATH=", proc.stdout)
+        self.assertIn("PATH=", proc.stderr)
+        self.assertIn("doing work", proc.stdout, "child stdout must be forwarded verbatim")
+        self.assertIn(loop.RECEIPT_PREFIX, proc.stdout)
+
+    def test_receipt_not_leaked_into_chat_stderr(self):
+        """Runner bookkeeping never prints the receipt to stderr (noise control)."""
+        proc = run_loop("tick", str(self.manifest), "--",
+                        *echo_receipt_cmd(self.dir, [receipt_echo_line(outcome="no_op")], "t2.sh"))
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn(loop.RECEIPT_PREFIX, proc.stderr)
 
     def test_measured_receipt_appended_exit_zero(self):
         effects = [{"ref": "q", "metric_before": 9, "metric_after": 4}]
@@ -320,7 +329,7 @@ class TickOutcomeTests(unittest.TestCase):
         proc = run_loop("tick", str(path), "--", *cmd)
         self.assertEqual(proc.returncode, loop.EXIT_MISSING_BIN)
         self.assertIn("preflight FAILED", proc.stderr)
-        self.assertIn("PATH=", proc.stdout)
+        self.assertIn("PATH=", proc.stderr)
         self.assertFalse((self.dir / "side_effect.txt").exists())
         rows = self.ledger_lines()
         self.assertEqual(rows[0]["outcome"], "infra_error")
