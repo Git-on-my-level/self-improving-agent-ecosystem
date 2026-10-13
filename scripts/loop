@@ -42,6 +42,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
 RECEIPT_PREFIX = "LOOP_RECEIPT "
 STALL_PREFIX = "LOOP_STALLED "
@@ -338,18 +339,26 @@ def cmd_tick(argv):
         return EXIT_MISSING_BIN
 
     prior_count = len(read_ledger(ledger)[0])
-    try:
-        proc = subprocess.run(command, capture_output=True, text=True)
-    except OSError as exc:
-        print(f"failed to start command: {exc}", file=sys.stderr)
-        receipt = synth_receipt(manifest, "infra_error", f"failed to start: {exc}", [])
-        append_receipt(ledger, receipt)
-        print(RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":")))
-        return EXIT_INFRA
+    with tempfile.TemporaryDirectory(prefix="looptick-") as tmpdir:
+        out_path = pathlib.Path(tmpdir) / "stdout"
+        err_path = pathlib.Path(tmpdir) / "stderr"
+        try:
+            with out_path.open("w") as out_file, err_path.open("w") as err_file:
+                proc = subprocess.Popen(command, stdout=out_file, stderr=err_file)
+                returncode = proc.wait()
+        except OSError as exc:
+            print(f"failed to start command: {exc}", file=sys.stderr)
+            receipt = synth_receipt(manifest, "infra_error", f"failed to start: {exc}", [])
+            append_receipt(ledger, receipt)
+            print(RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":")))
+            return EXIT_INFRA
+        stdout = out_path.read_text()
+        stderr = err_path.read_text()
 
-    stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
     # Forward the child's streams: stdout is the chat delivery payload;
-    # stderr carries the command's own failure explanation.
+    # stderr carries the command's own failure explanation. The child ran with
+    # temp-FILE capture (not pipes), so detached grandchildren that inherited
+    # the fds cannot stall the tick or garble the captured streams.
     if stderr:
         sys.stderr.write(stderr)
         sys.stderr.flush()
