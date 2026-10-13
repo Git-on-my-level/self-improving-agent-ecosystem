@@ -17,10 +17,10 @@ saw, stall escalations) goes to stderr so a healthy silent tick stays silent.
 
 Transitional compatibility: some loops append their own receipt to the ledger
 and print nothing on healthy ticks (their stdout is a chat delivery payload).
-For those the runner falls back to the newest ledger row written during this
-tick's window and does not double-append. New loops should print the receipt;
-stdout is the contract. A loop that prints nothing AND writes no fresh ledger
-row is `infra_error` — exit 0 is never evidence of a healthy tick.
+For those the runner falls back to a ledger row appended during this tick
+and does not double-append. New loops should print the receipt; stdout is
+the contract. A loop that prints nothing AND writes no fresh ledger row is
+`infra_error` — exit 0 is never evidence of a healthy tick.
 
 Usage:
     loop tick <manifest> -- <cmd...>   Run one tick of the loop.
@@ -54,9 +54,6 @@ EXIT_OK = 0
 EXIT_INFRA = 5
 EXIT_MISSING_BIN = 6
 EXIT_MANIFEST = 7
-# A receipt found in the ledger counts as "this tick" if written after the
-# runner started, minus a small grace for clock skew.
-TICK_WINDOW_SLACK_S = 5.0
 
 
 def parse_time(value):
@@ -329,10 +326,9 @@ def cmd_tick(argv):
         print(RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":")))
         return EXIT_MISSING_BIN
 
-    started = dt.datetime.now(dt.timezone.utc)
+    prior_count = len(read_ledger(ledger)[0])
     try:
         proc = subprocess.run(command, capture_output=True, text=True)
-        stdout, returncode = proc.stdout, proc.returncode
     except OSError as exc:
         print(f"failed to start command: {exc}", file=sys.stderr)
         receipt = synth_receipt(manifest, "infra_error", f"failed to start: {exc}", [])
@@ -340,42 +336,46 @@ def cmd_tick(argv):
         print(RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":")))
         return EXIT_INFRA
 
-    # Forward the child's stdout verbatim: for no-agent cron jobs it IS the
-    # chat delivery payload; for agent jobs the receipt line below rides along
-    # and Hermes strips it.
+    stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
+    # Forward the child's streams: stdout is the chat delivery payload;
+    # stderr carries the command's own failure explanation.
+    if stderr:
+        sys.stderr.write(stderr)
+        sys.stderr.flush()
     if stdout:
         sys.stdout.write(stdout)
         sys.stdout.flush()
 
     receipt, problem = extract_receipt(stdout)
+    rows, _ = read_ledger(ledger)
     if receipt is not None:
-        rows, _ = read_ledger(ledger)
+        if returncode != 0:
+            receipt["outcome"] = "infra_error"
+            receipt.setdefault("error", f"exit {returncode}")
+        receipt.setdefault("loop", manifest["loop"])
         tail = rows[-1] if rows else None
-        if tail and tail.get("run") == receipt.get("run") and tail.get("loop") == receipt.get("loop"):
-            pass  # the loop already appended its own receipt; never double-write
-        else:
-            receipt.setdefault("loop", manifest["loop"])
+        # Only skip a printed receipt when this tick already self-appended
+        # the same payload. Matching loop+run on a prior row drops retries.
+        already_appended = len(rows) > prior_count and tail == receipt
+        if not already_appended:
             append_receipt(ledger, receipt)
-    else:
+    elif (
+        returncode == 0
+        and problem == "no LOOP_RECEIPT line on stdout"
+        and len(rows) > prior_count
+    ):
         # Transitional fallback: healthy silent loops that self-append (their
-        # stdout is the chat payload). Accept their fresh ledger row instead.
-        rows, _ = read_ledger(ledger)
-        fallback = None
-        if rows:
-            candidate = rows[-1]
-            at = parse_time(candidate.get("run"))
-            if at is not None and at >= started - dt.timedelta(seconds=TICK_WINDOW_SLACK_S):
-                fallback = candidate
-        if fallback is not None and returncode == 0:
-            receipt = fallback
-        else:
-            reason = problem if problem != "no LOOP_RECEIPT line on stdout" else "no receipt and no fresh ledger row"
-            if returncode != 0:
-                reason = f"exit {returncode}: {reason}"
-            print(f"infra_error: {reason}", file=sys.stderr)
-            receipt = synth_receipt(manifest, "infra_error", reason, [])
-            append_receipt(ledger, receipt)
-            return EXIT_INFRA
+        # stdout is the chat payload). Accept a row they wrote this tick;
+        # a prior/future-dated stamp or an invalid LOOP_RECEIPT does not count.
+        receipt = rows[-1]
+    else:
+        reason = problem if problem != "no LOOP_RECEIPT line on stdout" else "no receipt and no fresh ledger row"
+        if returncode != 0:
+            reason = f"exit {returncode}: {reason}"
+        print(f"infra_error: {reason}", file=sys.stderr)
+        receipt = synth_receipt(manifest, "infra_error", reason, [])
+        append_receipt(ledger, receipt)
+        return EXIT_INFRA
 
     # Stall bookkeeping against the whole ledger.
     rows, _ = read_ledger(ledger)

@@ -288,7 +288,7 @@ class TickOutcomeTests(unittest.TestCase):
         def self_appender():
             helper = self.dir / "selfappend.py"
             helper.write_text(
-                "import datetime as dt, json, pathlib, sys\n"
+                "import datetime as dt, json, pathlib\n"
                 f"ledger = pathlib.Path({str(self.ledger)!r})\n"
                 "ledger.parent.mkdir(parents=True, exist_ok=True)\n"
                 "r = {'loop': 'test-loop', 'run': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),"
@@ -296,6 +296,7 @@ class TickOutcomeTests(unittest.TestCase):
                 " 'preflight': {}}\n"
                 "with ledger.open('a') as f:\n"
                 "    f.write('LOOP_RECEIPT ' + json.dumps(r) + chr(10))\n"
+                "print('chat delivery payload')\n"
             )
             return [sys.executable, str(helper)]
 
@@ -303,19 +304,120 @@ class TickOutcomeTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = self.ledger_lines()
         self.assertEqual(len(rows), 1, "runner must not double-append a self-appended receipt")
+        self.assertIn("chat delivery payload", proc.stdout)
+
+    def test_self_append_with_older_run_timestamp_is_accepted(self):
+        """Self-appended rows stamp the scheduled slot, which may be older than now."""
+        old_run = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat(timespec="seconds")
+        helper = self.dir / "oldrun.py"
+        helper.write_text(
+            "import json, pathlib\n"
+            f"ledger = pathlib.Path({str(self.ledger)!r})\n"
+            "ledger.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"r = {{'loop': 'test-loop', 'run': {old_run!r},"
+            " 'outcome': 'acted', 'effects': [{'ref': 'u'}], 'open_items': 0,"
+            " 'oldest_open_days': 0, 'preflight': {}}\n"
+            "with ledger.open('a') as f:\n"
+            "    f.write('LOOP_RECEIPT ' + json.dumps(r) + chr(10))\n"
+            "print('scheduled-slot chat')\n"
+        )
+        proc = run_loop("tick", str(self.manifest), "--", sys.executable, str(helper))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rows = self.ledger_lines()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["run"], old_run)
+        self.assertEqual(rows[0]["outcome"], "acted")
+        self.assertIn("scheduled-slot chat", proc.stdout)
+
+    def test_silent_tick_does_not_reuse_recent_or_future_prior_row(self):
+        """Fallback requires a row written this tick, not a close or future run stamp."""
+        now = dt.datetime.now(dt.timezone.utc)
+        for label, run in (
+            ("recent", now.isoformat(timespec="seconds")),
+            ("future", (now + dt.timedelta(days=1)).isoformat(timespec="seconds")),
+        ):
+            with self.subTest(label=label):
+                self.ledger.parent.mkdir(parents=True, exist_ok=True)
+                self.ledger.write_text(
+                    loop.RECEIPT_PREFIX + json.dumps(receipt(outcome="no_op", run=run)) + "\n")
+                proc = run_loop("tick", str(self.manifest), "--",
+                                *script_cmd(self.dir, "#!/bin/sh\nexit 0\n", f"{label}.sh"))
+                self.assertEqual(proc.returncode, loop.EXIT_INFRA)
+                rows = self.ledger_lines()
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(rows[-1]["outcome"], "infra_error")
+
+    def test_invalid_receipt_not_rescued_by_fresh_looking_row(self):
+        fresh = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        self.ledger.write_text(
+            loop.RECEIPT_PREFIX + json.dumps(receipt(outcome="no_op", run=fresh)) + "\n")
+        cmd = script_cmd(self.dir, "#!/bin/sh\necho 'LOOP_RECEIPT {not json}'\n")
+        proc = run_loop("tick", str(self.manifest), "--", *cmd)
+        self.assertEqual(proc.returncode, loop.EXIT_INFRA)
+        rows = self.ledger_lines()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[-1]["outcome"], "infra_error")
+
+    def test_same_run_on_later_tick_is_still_appended(self):
+        slot = "2026-10-13T12:00:00+00:00"
+        first = run_loop("tick", str(self.manifest), "--",
+                         *echo_receipt_cmd(self.dir, [receipt_echo_line(run=slot, outcome="no_op")], "a.sh"))
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = run_loop("tick", str(self.manifest), "--",
+                          *echo_receipt_cmd(self.dir, [receipt_echo_line(
+                              run=slot, outcome="acted", effects=[{"ref": "u"}])], "b.sh"))
+        self.assertEqual(second.returncode, 0, second.stderr)
+        rows = self.ledger_lines()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["outcome"], "no_op")
+        self.assertEqual(rows[1]["outcome"], "acted")
+        self.assertEqual(rows[1]["effects"][0]["ref"], "u")
+
+    def test_self_append_and_print_same_receipt_is_not_duplicated(self):
+        slot = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        payload = receipt(outcome="no_op", run=slot)
+        helper = self.dir / "both.py"
+        helper.write_text(
+            "import json, pathlib\n"
+            f"ledger = pathlib.Path({str(self.ledger)!r})\n"
+            "ledger.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"r = {payload!r}\n"
+            "with ledger.open('a') as f:\n"
+            "    f.write('LOOP_RECEIPT ' + json.dumps(r) + chr(10))\n"
+            "print('LOOP_RECEIPT ' + json.dumps(r))\n"
+        )
+        proc = run_loop("tick", str(self.manifest), "--", sys.executable, str(helper))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(self.ledger_lines()), 1)
 
     def test_nonzero_exit_with_valid_receipt_is_infra_error(self):
-        cmd = script_cmd(self.dir, f"#!/bin/sh\necho {receipt_line(outcome='no_op')}\nexit 3\n")
+        cmd = echo_receipt_cmd(self.dir, [receipt_echo_line(outcome="no_op"), "exit 3"], "t.sh")
+        proc = run_loop("tick", str(self.manifest), "--", *cmd)
+        self.assertEqual(proc.returncode, loop.EXIT_INFRA)
+        rows = self.ledger_lines()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outcome"], "infra_error")
+        self.assertIn("exit 3", rows[0].get("error", ""))
+        status = run_loop("status", str(self.manifest))
+        self.assertEqual(status.returncode, 0, status.stderr)
+        record = json.loads(status.stdout.strip().splitlines()[0])
+        self.assertEqual(record["last_outcome"], "infra_error")
+        self.assertEqual(record["fail_streak"], 1)
+
+    def test_infra_error_receipt_exit_nonzero(self):
+        cmd = echo_receipt_cmd(self.dir, [
+            receipt_echo_line(outcome="infra_error", error="credential missing"),
+        ], "t.sh")
         proc = run_loop("tick", str(self.manifest), "--", *cmd)
         self.assertEqual(proc.returncode, loop.EXIT_INFRA)
         self.assertEqual(self.ledger_lines()[0]["outcome"], "infra_error")
 
-    def test_infra_error_receipt_exit_nonzero(self):
-        cmd = script_cmd(self.dir, "#!/bin/sh\n"
-                                   f"echo {receipt_line(outcome='infra_error', error='credential missing')}\n")
+    def test_command_stderr_forwarded_on_infra_error(self):
+        cmd = script_cmd(self.dir, "#!/bin/sh\necho why-failed >&2\nexit 2\n")
         proc = run_loop("tick", str(self.manifest), "--", *cmd)
         self.assertEqual(proc.returncode, loop.EXIT_INFRA)
-        self.assertEqual(self.ledger_lines()[0]["outcome"], "infra_error")
+        self.assertIn("why-failed", proc.stderr)
 
     def test_invalid_receipt_is_infra_error(self):
         cmd = script_cmd(self.dir, "#!/bin/sh\necho 'LOOP_RECEIPT {not json'}\n")
