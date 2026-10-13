@@ -102,6 +102,10 @@ class HelperUnitTests(unittest.TestCase):
         self.assertIsNotNone(loop.parse_time("2026-10-13T04:05:06+00:00"))
         self.assertIsNotNone(loop.parse_time("2026-10-13T04:05:06Z"))
         self.assertIsNotNone(loop.parse_time("2026-10-13T04:05:06"))
+        self.assertIsNotNone(loop.parse_time("2026-10-13T04:05:06+0700"),
+                             "strftime('%z') stamps are colonless; 3.9 fromisoformat rejects them")
+        self.assertEqual(loop.parse_time("2026-10-13T04:05:06+0700"),
+                         loop.parse_time("2026-10-13T04:05:06+07:00"))
         self.assertIsNone(loop.parse_time("not-a-time"))
         self.assertIsNone(loop.parse_time(None))
         self.assertIsNone(loop.parse_time(42))

@@ -59,12 +59,21 @@ EXIT_MANIFEST = 7
 LOOP_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,62}$")
 
 
+_ISO_TZ_FIX_RE = re.compile(r"([+-]\d{2})(\d{2})$")
+
+
 def parse_time(value):
-    """Parse ISO-8601 to aware UTC datetime; None on failure."""
+    """Parse ISO-8601 to aware UTC datetime; None on failure.
+
+    Normalizes colonless UTC offsets ("+0700") that Python 3.9's
+    fromisoformat rejects — loop scripts commonly stamp via strftime('%z'),
+    which produces exactly that form.
+    """
     if not isinstance(value, str) or not value:
         return None
+    normalized = _ISO_TZ_FIX_RE.sub(r"\1:\2", value.strip())
     try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = dt.datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except ValueError:
         return None
     if parsed.tzinfo is None:
