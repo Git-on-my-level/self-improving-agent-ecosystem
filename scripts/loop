@@ -35,11 +35,11 @@ LOOP_STALLED on stdout is the page, and it fires once per stall transition.
 """
 from __future__ import annotations
 
-import argparse
 import datetime as dt
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -54,6 +54,8 @@ EXIT_OK = 0
 EXIT_INFRA = 5
 EXIT_MISSING_BIN = 6
 EXIT_MANIFEST = 7
+
+LOOP_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,62}$")
 
 
 def parse_time(value):
@@ -99,8 +101,8 @@ def load_manifest(path):
 
     req("schema_version", int)
     loop = req("loop", str, "nonempty")
-    if isinstance(loop, str) and not loop.replace("-", "").replace("_", "").isalnum():
-        errors.append("loop: use [a-z0-9-_] identifiers")
+    if isinstance(loop, str) and not LOOP_ID_RE.match(loop):
+        errors.append("loop: must match [a-z0-9][a-z0-9_-]{1,62}")
     req("host", str, "nonempty")
     if data.get("archetype") not in ARCHETYPES:
         errors.append(f"archetype: must be one of {', '.join(ARCHETYPES)}")
@@ -141,21 +143,20 @@ def expand_ledger(manifest):
 
 
 def extract_receipt(stdout_text):
-    """Return the last valid receipt dict from stdout, or (None, reason)."""
-    found = None
-    reason = "no LOOP_RECEIPT line on stdout"
+    """Return the last LOOP_RECEIPT line's receipt if it is valid, else the reason.
+
+    Strict: the receipt line is the tick's final statement, so the LAST
+    LOOP_RECEIPT line decides — a malformed final line invalidates the tick
+    even if an earlier line parsed.
+    """
+    last_payload = None
     for line in stdout_text.splitlines():
         stripped = line.strip()
-        if not stripped.startswith(RECEIPT_PREFIX):
-            continue
-        payload = stripped[len(RECEIPT_PREFIX):].strip()
-        receipt, problem = validate_receipt(payload)
-        if receipt is not None:
-            found = receipt
-            reason = None
-        else:
-            reason = f"invalid LOOP_RECEIPT: {problem}"
-    return found, reason
+        if stripped.startswith(RECEIPT_PREFIX):
+            last_payload = stripped[len(RECEIPT_PREFIX):].strip()
+    if last_payload is None:
+        return None, "no LOOP_RECEIPT line on stdout"
+    return validate_receipt(last_payload)
 
 
 def validate_receipt(payload):
@@ -218,6 +219,16 @@ def append_receipt(ledger_path, receipt):
     line = RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":"), sort_keys=False)
     with ledger_path.open("a") as handle:
         handle.write(line + "\n")
+
+
+def rewrite_last_receipt(ledger_path, receipt):
+    """Replace the final receipt row in place (same row count, new content)."""
+    lines = ledger_path.read_text().splitlines()
+    if not lines:
+        append_receipt(ledger_path, receipt)
+        return
+    lines[-1] = RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":"), sort_keys=False)
+    ledger_path.write_text("\n".join(lines) + "\n")
 
 
 # ---------------------------------------------------------------- preflight
@@ -350,8 +361,12 @@ def cmd_tick(argv):
     rows, _ = read_ledger(ledger)
     if receipt is not None:
         if returncode != 0:
+            # Durability rule: a failed tick is never durably healthy. Rewrite
+            # the outcome in place; the loop's receipt (with its evidence)
+            # stays in the same row via `error`, or rides on the rewritten one.
+            original = json.dumps(receipt, separators=(",", ":"))
             receipt["outcome"] = "infra_error"
-            receipt.setdefault("error", f"exit {returncode}")
+            receipt.setdefault("error", f"tick exited {returncode}; loop receipt: {original}")
         receipt.setdefault("loop", manifest["loop"])
         tail = rows[-1] if rows else None
         # Only skip a printed receipt when this tick already self-appended
@@ -359,15 +374,24 @@ def cmd_tick(argv):
         already_appended = len(rows) > prior_count and tail == receipt
         if not already_appended:
             append_receipt(ledger, receipt)
-    elif (
-        returncode == 0
-        and problem == "no LOOP_RECEIPT line on stdout"
-        and len(rows) > prior_count
-    ):
-        # Transitional fallback: healthy silent loops that self-append (their
-        # stdout is the chat payload). Accept a row they wrote this tick;
-        # a prior/future-dated stamp or an invalid LOOP_RECEIPT does not count.
-        receipt = rows[-1]
+        elif returncode != 0:
+            # The loop self-appended a healthy receipt and then crashed:
+            # rewrite that fresh row in place rather than stacking a second.
+            rewrite_last_receipt(ledger, receipt)
+    elif len(rows) > prior_count and problem == "no LOOP_RECEIPT line on stdout":
+        # Transitional fallback: silent loops that self-append (their stdout is
+        # the chat payload). Accept a row they wrote this tick; a prior or
+        # future-dated stamp does not count as a fresh row. On a nonzero exit
+        # the durability branch above never ran, so handle it here: rewrite
+        # that fresh row in place instead of stacking a synthetic second row.
+        if returncode != 0:
+            original = json.dumps(rows[-1], separators=(",", ":"))
+            receipt = dict(rows[-1])
+            receipt["outcome"] = "infra_error"
+            receipt.setdefault("error", f"tick exited {returncode}; loop receipt: {original}")
+            rewrite_last_receipt(ledger, receipt)
+        else:
+            receipt = rows[-1]
     else:
         reason = problem if problem != "no LOOP_RECEIPT line on stdout" else "no receipt and no fresh ledger row"
         if returncode != 0:

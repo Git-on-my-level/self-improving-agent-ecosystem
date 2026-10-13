@@ -127,7 +127,7 @@ class HelperUnitTests(unittest.TestCase):
     def test_extract_receipt_invalid_json(self):
         got, problem = loop.extract_receipt("LOOP_RECEIPT {broken")
         self.assertIsNone(got)
-        self.assertIn("invalid LOOP_RECEIPT", problem)
+        self.assertIn("not JSON", problem)
 
     def test_validate_receipt_rejects_bad_outcome(self):
         got, problem = loop.validate_receipt(json.dumps(receipt(outcome="ok")))
@@ -398,7 +398,7 @@ class TickOutcomeTests(unittest.TestCase):
         rows = self.ledger_lines()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["outcome"], "infra_error")
-        self.assertIn("exit 3", rows[0].get("error", ""))
+        self.assertIn("exited 3", rows[0].get("error", ""))
         status = run_loop("status", str(self.manifest))
         self.assertEqual(status.returncode, 0, status.stderr)
         record = json.loads(status.stdout.strip().splitlines()[0])
@@ -408,10 +408,48 @@ class TickOutcomeTests(unittest.TestCase):
     def test_infra_error_receipt_exit_nonzero(self):
         cmd = echo_receipt_cmd(self.dir, [
             receipt_echo_line(outcome="infra_error", error="credential missing"),
+            "exit 4",
         ], "t.sh")
         proc = run_loop("tick", str(self.manifest), "--", *cmd)
         self.assertEqual(proc.returncode, loop.EXIT_INFRA)
-        self.assertEqual(self.ledger_lines()[0]["outcome"], "infra_error")
+        rows = self.ledger_lines()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outcome"], "infra_error")
+        self.assertEqual(rows[0].get("error"), "credential missing")
+
+    def test_self_appended_row_rewritten_on_nonzero_exit(self):
+        """A crashed self-appending loop's row is rewritten infra_error in place."""
+        def self_appender_crash():
+            helper = self.dir / "selfappend_crash.py"
+            helper.write_text(
+                "import datetime as dt, json, pathlib, sys\n"
+                f"ledger = pathlib.Path({str(self.ledger)!r})\n"
+                "ledger.parent.mkdir(parents=True, exist_ok=True)\n"
+                "r = {'loop': 'test-loop', 'run': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),"
+                " 'outcome': 'no_op', 'effects': [], 'open_items': 0, 'oldest_open_days': 0,"
+                " 'preflight': {}}\n"
+                "with ledger.open('a') as f:\n"
+                "    f.write('LOOP_RECEIPT ' + json.dumps(r) + chr(10))\n"
+                "sys.exit(7)\n"
+            )
+            return [sys.executable, str(helper)]
+
+        proc = run_loop("tick", str(self.manifest), "--", *self_appender_crash())
+        self.assertEqual(proc.returncode, loop.EXIT_INFRA)
+        rows = self.ledger_lines()
+        self.assertEqual(len(rows), 1, "rewrite in place; never a second row")
+        self.assertEqual(rows[0]["outcome"], "infra_error")
+        self.assertIn("exited 7", rows[0].get("error", ""))
+
+    def test_extract_receipt_strict_last_line(self):
+        """A corrupt final receipt line invalidates the tick even after a valid one."""
+        stdout = "\n".join([
+            receipt_line(outcome="no_op", run="2026-10-13T01:00:00+00:00"),
+            "LOOP_RECEIPT {corrupt",
+        ])
+        got, problem = loop.extract_receipt(stdout)
+        self.assertIsNone(got)
+        self.assertIn("not JSON", problem)
 
     def test_command_stderr_forwarded_on_infra_error(self):
         cmd = script_cmd(self.dir, "#!/bin/sh\necho why-failed >&2\nexit 2\n")
