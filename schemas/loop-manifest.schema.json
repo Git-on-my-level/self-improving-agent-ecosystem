@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/loop-manifest.schema.json",
   "title": "Lite loop manifest",
-  "description": "The minimal contract that makes an existing cron loop provable: one archetype, one goal metric, one receipt per tick, a durable ledger, and a progress budget. Roles, identities, and the full ecosystem.json planes stay optional.",
+  "description": "The minimal contract that makes an existing cron loop provable: one archetype, one goal metric, one receipt per tick, a durable ledger, and a progress budget or a health SLO. A receipt may carry invalidates_effects (a list of objects with string run and string ref) so a later row drops those effects from counting, matched on loop+run+ref, without rewriting the historical row. A malformed list makes the receipt invalid. A successful correction-only row is not a health sample. Roles, identities, and the full ecosystem.json planes stay optional.",
   "type": "object",
   "required": ["schema_version", "loop", "host", "archetype", "goal_metric", "authority", "ledger", "progress_budget_seconds", "stop_rule"],
   "additionalProperties": true,
@@ -47,9 +47,37 @@
       "description": "The stage that closes a work item (merge, resolve, supersede, or an explicit escalation). Empty string when not yet defined."
     },
     "progress_budget_seconds": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "How long the loop may go without a receipt with outcome acted|measured and nonempty effects before it is stalled."
+      "description": "How long the loop may go without a receipt with outcome acted|measured and nonempty effects before it is stalled. Null only when health is set; a health SLO replaces this budget for stall.",
+      "oneOf": [
+        {"type": "integer", "minimum": 1},
+        {"type": "null"}
+      ]
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metric", "op", "threshold", "max_age_seconds"],
+      "description": "Optional SLO for watch/monitor loops. When set, stalled means the latest receipt missed the threshold, is infra_error, lacks metrics[metric], or is older than max_age_seconds. A fresh passing measurement is not stalled, even with empty effects. A failing or missing sample must not read healthy.",
+      "properties": {
+        "metric": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of the number the receipt reports under metrics."
+        },
+        "op": {
+          "enum": ["eq", "ne", "lt", "lte", "gt", "gte"],
+          "description": "Comparison of metrics[metric] against threshold. Healthy when the comparison holds."
+        },
+        "threshold": {
+          "type": "number",
+          "description": "Finite number. NaN and infinities are rejected by the runner."
+        },
+        "max_age_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "A measurement older than this is stale and therefore stalled, the same as a missing sample."
+        }
+      }
     },
     "stop_rule": {
       "type": "string",
@@ -72,5 +100,14 @@
       "description": "Advisory back-pointer to the cron/launchd schedule that drives this loop (job id or expression). Not interpreted by the runner."
     },
     "notes": {"type": "string"}
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"progress_budget_seconds": {"type": "null"}},
+        "required": ["progress_budget_seconds"]
+      },
+      "then": {"required": ["health"]}
+    }
+  ]
 }

@@ -8,9 +8,18 @@ loop ends with ONE receipt line on stdout:
                   "effects":[{"ref":"<url>","metric_before":n|null,"metric_after":n|null}],
                   "open_items":n,"oldest_open_days":n,"preflight":{"<bin>":true}}
 
+A later row may carry "invalidates_effects":[{"run":"<iso8601>","ref":"<url>"}].
+Those effects, matched on loop+run+ref, drop out of effect counting. The
+historical row is left as written. A successful correction-only row is not a
+health sample, and it does not clear an earlier invalid sample.
+
 The runner is the ledger writer. It captures the receipt, appends it to the
-manifest's durable JSONL ledger, and computes progress (`last_effect_at`) and
-stall state against the manifest's progress budget. The child's stdout is
+manifest's durable JSONL ledger, and computes stall state. Loops that move a
+metric stall when no `acted`/`measured` receipt with nonempty `effects` lands
+inside `progress_budget_seconds`. Watch loops set `health` instead: stall
+means the latest receipt missed that SLO, is `infra_error`, lacks the metric,
+or is older than `health.max_age_seconds`. A passing measurement is not
+stalled. The child's stdout is
 forwarded verbatim on the runner's stdout — for no-agent cron jobs that stdout
 is the chat delivery payload — and the runner's own bookkeeping (the PATH it
 saw, stall escalations) goes to stderr so a healthy silent tick stays silent.
@@ -37,6 +46,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import pathlib
 import re
@@ -50,6 +60,7 @@ OUTCOMES = ("acted", "measured", "no_op", "infra_error")
 ARCHETYPES = ("optimize", "maintain", "observe_propose")
 AUTHORITIES = ("propose", "pr", "merge", "deploy")
 EFFECT_OUTCOMES = ("acted", "measured")
+HEALTH_OPS = ("eq", "ne", "lt", "lte", "gt", "gte")
 SCHEMA_VERSION = 1
 EXIT_OK = 0
 EXIT_INFRA = 5
@@ -126,9 +137,36 @@ def load_manifest(path):
             errors.append("ledger: durable paths only, never an ephemeral scratch volume")
         if not expanded.endswith(".jsonl"):
             errors.append("ledger: must point to a .jsonl file")
-    budget = data.get("progress_budget_seconds")
-    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
-        errors.append("progress_budget_seconds: must be a positive integer")
+    health_errors_at = len(errors)
+    if "health" in data:
+        health = data.get("health")
+        if not isinstance(health, dict):
+            errors.append("health: must be an object")
+        else:
+            metric = health.get("metric")
+            if not isinstance(metric, str) or not metric.strip():
+                errors.append("health.metric: must be a nonempty string")
+            if health.get("op") not in HEALTH_OPS:
+                errors.append("health.op: must be one of " + ", ".join(HEALTH_OPS))
+            threshold = health.get("threshold")
+            if not _is_finite_number(threshold):
+                errors.append("health.threshold: must be a finite number")
+            age = health.get("max_age_seconds")
+            if isinstance(age, bool) or not isinstance(age, int) or age <= 0:
+                errors.append("health.max_age_seconds: must be a positive integer")
+            unknown = sorted(set(health) - {"metric", "op", "threshold", "max_age_seconds"})
+            if unknown:
+                errors.append("health: unknown fields " + ", ".join(unknown))
+    health_ok = "health" in data and isinstance(data.get("health"), dict) and len(errors) == health_errors_at
+    if "progress_budget_seconds" not in data:
+        errors.append("progress_budget_seconds: missing or wrong type (want a positive integer, or null with health)")
+    else:
+        budget = data.get("progress_budget_seconds")
+        if budget is None:
+            if not health_ok:
+                errors.append("progress_budget_seconds: null is only valid when health is set")
+        elif isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+            errors.append("progress_budget_seconds: must be a positive integer or null when health is set")
     req("stop_rule", str, "nonempty")
     requires = data.get("requires", [])
     if not isinstance(requires, list) or not all(isinstance(b, str) and b for b in requires):
@@ -196,6 +234,26 @@ def validate_receipt(payload):
     preflight = receipt.get("preflight", {})
     if not isinstance(preflight, dict):
         return None, "preflight must be an object"
+    if "metrics" in receipt:
+        metrics = receipt.get("metrics")
+        if not isinstance(metrics, dict):
+            return None, "metrics must be an object"
+        for key, value in metrics.items():
+            if not isinstance(key, str) or not key:
+                return None, "metrics keys must be nonempty strings"
+            if not _is_finite_number(value):
+                return None, f"metrics.{key} must be a finite number"
+    if "invalidates_effects" in receipt:
+        items = receipt.get("invalidates_effects")
+        if not isinstance(items, list):
+            return None, "invalidates_effects must be a list"
+        for item in items:
+            if not isinstance(item, dict):
+                return None, "invalidates_effects entries must be objects"
+            run = item.get("run")
+            ref = item.get("ref")
+            if not isinstance(run, str) or not run or not isinstance(ref, str) or not ref:
+                return None, "invalidates_effects entries need string run and string ref"
     return receipt, None
 
 
@@ -203,24 +261,38 @@ def has_effects(receipt):
     return receipt.get("outcome") in EFFECT_OUTCOMES and bool(receipt.get("effects"))
 
 
-def read_ledger(ledger_path):
-    """Parse a JSONL ledger of receipts; skip corrupt rows. (rows, corrupt_count)."""
+def scan_ledger(ledger_path):
+    """Parse a JSONL ledger in append order.
+
+    `rows` keeps valid receipts for effect counting. `health_rows` keeps the
+    same order and uses None for an unparseable line, so health can fail
+    closed on that sample even when a later correction follows it.
+    """
     rows = []
+    health_rows = []
     corrupt = 0
     try:
         text = ledger_path.read_text()
     except OSError:
-        return rows, corrupt
+        return rows, corrupt, health_rows
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
         payload = line[len(RECEIPT_PREFIX):] if line.startswith(RECEIPT_PREFIX) else line
-        receipt, problem = validate_receipt(payload)
+        receipt, _problem = validate_receipt(payload)
         if receipt is None:
             corrupt += 1
+            health_rows.append(None)
             continue
         rows.append(receipt)
+        health_rows.append(receipt)
+    return rows, corrupt, health_rows
+
+
+def read_ledger(ledger_path):
+    """Parse a JSONL ledger of receipts; skip corrupt rows. (rows, corrupt_count)."""
+    rows, corrupt, _health_rows = scan_ledger(ledger_path)
     return rows, corrupt
 
 
@@ -256,43 +328,187 @@ def missing_binaries(names):
 # ---------------------------------------------------------------- stall
 
 
-def compute_state(rows, budget_seconds, now=None):
-    """Collector state from ledger rows. rows must be in ledger (append) order."""
-    now = now or dt.datetime.now(dt.timezone.utc)
-    last_run = None
-    last_outcome = None
-    last_effect_at = None
-    effects_7d = 0
-    fail_streak = 0
+# Clock skew allowed before a receipt timestamp counts as future and invalid.
+FUTURE_SKEW_SECONDS = 300
+
+
+def _is_finite_number(value):
+    """True for real ints and floats. Bools, null, NaN, and infinities are not."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
+
+
+def _health_compare(op, value, threshold):
+    if op == "eq":
+        return value == threshold
+    if op == "ne":
+        return value != threshold
+    if op == "lt":
+        return value < threshold
+    if op == "lte":
+        return value <= threshold
+    if op == "gt":
+        return value > threshold
+    if op == "gte":
+        return value >= threshold
+    return False
+
+
+def _successful_correction_only(receipt, health):
+    """A succeeded row whose only job is to invalidate effects, not to measure.
+
+    infra_error and any measurement (including a failing one) stay in the
+    health sample. Skipping those let a correction hide a real failure.
+    """
+    items = receipt.get("invalidates_effects")
+    if not isinstance(items, list) or not items:
+        return False
+    if receipt.get("outcome") in ("infra_error", "measured"):
+        return False
+    metrics = receipt.get("metrics")
+    metric_name = health.get("metric")
+    if isinstance(metrics, dict) and metric_name in metrics:
+        return False
+    return True
+
+
+def slo_healthy(rows, health, now):
+    """True only when the latest append-order sample is fresh and meets the SLO.
+
+    Latest is the last sample in ledger order, not the greatest timestamp.
+    None is an unparseable row and is itself an unhealthy sample. A later
+    successful correction-only row is skipped and does not clear that sample.
+    A future timestamp beyond the skew bound, a non-finite metric, or a
+    missed SLO is unhealthy and does not fall back to an older pass.
+    """
+    latest = None
+    saw_sample = False
     for receipt in rows:
+        if receipt is None:
+            latest = None
+            saw_sample = True
+            continue
+        if _successful_correction_only(receipt, health):
+            continue
+        latest = receipt
+        saw_sample = True
+    if not saw_sample or latest is None:
+        return False
+    at = parse_time(latest.get("run"))
+    if at is None:
+        return False
+    age = (now - at).total_seconds()
+    if age < -FUTURE_SKEW_SECONDS:
+        return False
+    if age < 0:
+        age = 0
+    if age > health["max_age_seconds"]:
+        return False
+    if latest.get("outcome") == "infra_error":
+        return False
+    metrics = latest.get("metrics")
+    metric = health["metric"]
+    if not isinstance(metrics, dict) or metric not in metrics:
+        return False
+    value = metrics[metric]
+    threshold = health.get("threshold")
+    if not _is_finite_number(value) or not _is_finite_number(threshold):
+        return False
+    return _health_compare(health["op"], value, threshold)
+
+
+def compute_state(rows, budget_seconds, now=None, health=None, health_rows=None):
+    """Count goal improvements by fingerprint/window; latest group state wins.
+
+    Legacy non-group effects retain their contract. Corrections cannot refresh a
+    measurement's timestamp or multiply its count. Reopened groups invalidate
+    previously counted improvements until a subsequent measurement verifies them.
+
+    Without `health`, stall is the progress budget. With `health`, stall is the
+    SLO: a fresh passing measurement is not stalled, even with empty effects.
+    Only a successful correction-only row is left out of the health sample.
+    An invalid row stays in that order, so a later correction cannot clear it.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    last_run = last_outcome = last_effect_at = None
+    effects_7d = fail_streak = 0
+    invalidated = set()
+    for row in rows:
+        items = row.get("invalidates_effects", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = (row.get("loop"), item.get("run"), item.get("ref"))
+            try:
+                hash(key)
+            except TypeError:
+                continue
+            invalidated.add(key)
+    windows = {}
+    latest = {}
+    legacy = []
+    for index, receipt in enumerate(rows):
         at = parse_time(receipt.get("run"))
         if at is None:
             continue
         if last_run is None or at >= parse_time(last_run):
-            last_run = receipt["run"]
-            last_outcome = receipt.get("outcome")
-        if has_effects(receipt):
-            if last_effect_at is None or at > parse_time(last_effect_at):
-                last_effect_at = receipt["run"]
-            if now - at <= dt.timedelta(days=7):
-                effects_7d += len(receipt.get("effects") or [])
+            last_run, last_outcome = receipt["run"], receipt.get("outcome")
+        if receipt.get("outcome") not in EFFECT_OUTCOMES:
+            continue
+        for effect in receipt.get("effects", []):
+            if (receipt.get("loop"), receipt.get("run"), effect.get("ref")) in invalidated:
+                continue
+            fp = effect.get("fingerprint")
+            end = parse_time(effect.get("window_end"))
+            start = parse_time(effect.get("window_start"))
+            if fp:
+                # A malformed goal measurement must never become an effect.
+                if not start or not end or end <= start or end > now:
+                    continue
+                group = (receipt.get("loop"), fp)
+                key = (group, start, end)
+                order = (end, at, index)
+                if key not in windows or order > windows[key][0]:
+                    windows[key] = (order, effect, end)
+                if group not in latest or order > latest[group][0]:
+                    latest[group] = (order, effect)
+            else:
+                legacy.append((effect, at))
+    counted = list(legacy)
+    measurements_7d = 0
+    for key, (_, effect, end) in windows.items():
+        if dt.timedelta(0) <= now - end <= dt.timedelta(days=7):
+            measurements_7d += 1
+        latest_effect = latest[key[0]][1]
+        if effect.get("verdict") == "improved" and latest_effect.get("verdict") == "improved":
+            counted.append((effect, end))
+    for _, at in counted:
+        if last_effect_at is None or at > parse_time(last_effect_at):
+            last_effect_at = at.isoformat(timespec="seconds")
+        if dt.timedelta(0) <= now - at <= dt.timedelta(days=7):
+            effects_7d += 1
     for receipt in reversed(rows):
         if receipt.get("outcome") == "infra_error":
             fail_streak += 1
         else:
             break
-    effect_age = None
-    if last_effect_at is not None:
-        effect_age = (now - parse_time(last_effect_at)).total_seconds()
-    stalled = effect_age is None or effect_age > budget_seconds
-    return {
-        "last_run": last_run,
-        "last_outcome": last_outcome,
-        "last_effect_at": last_effect_at,
-        "effects_7d": effects_7d,
+    effect_age = (now - parse_time(last_effect_at)).total_seconds() if last_effect_at else None
+    result = {
+        "last_run": last_run, "last_outcome": last_outcome,
+        "last_effect_at": last_effect_at, "effects_7d": effects_7d,
         "fail_streak": fail_streak,
-        "stalled": stalled,
+        "stalled": effect_age is None or budget_seconds is None or effect_age > budget_seconds,
     }
+    if windows:
+        result["measurements_7d"] = measurements_7d
+        result["reopened_groups"] = sum(effect.get("verdict") == "reopened" for _, effect in latest.values())
+    if health:
+        result["healthy"] = slo_healthy(rows if health_rows is None else health_rows, health, now)
+        result["stalled"] = not result["healthy"]
+    return result
 
 
 def stall_state_path(ledger_path):
@@ -345,6 +561,7 @@ def cmd_tick(argv):
                                 f"missing binaries: {', '.join(missing)}", missing)
         append_receipt(ledger, receipt)
         print(RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":")))
+        record_stall(manifest, ledger)
         return EXIT_MISSING_BIN
 
     prior_count = len(read_ledger(ledger)[0])
@@ -360,6 +577,7 @@ def cmd_tick(argv):
             receipt = synth_receipt(manifest, "infra_error", f"failed to start: {exc}", [])
             append_receipt(ledger, receipt)
             print(RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":")))
+            record_stall(manifest, ledger)
             return EXIT_INFRA
         stdout = out_path.read_text()
         stderr = err_path.read_text()
@@ -417,24 +635,50 @@ def cmd_tick(argv):
         print(f"infra_error: {reason}", file=sys.stderr)
         receipt = synth_receipt(manifest, "infra_error", reason, [])
         append_receipt(ledger, receipt)
+        record_stall(manifest, ledger)
         return EXIT_INFRA
 
-    # Stall bookkeeping against the whole ledger.
-    rows, _ = read_ledger(ledger)
-    state = compute_state(rows, manifest["progress_budget_seconds"])
-    previous = read_stall_state(ledger)
-    if state["stalled"] and not previous.get("stalled"):
-        age = "never" if state["last_effect_at"] is None else state["last_effect_at"]
-        print(
-            f"{STALL_PREFIX}loop={manifest['loop']} last_effect_at={age} "
-            f"progress_budget_seconds={manifest['progress_budget_seconds']} "
-            f"stop_rule: {manifest['stop_rule']}"
-        )
-    write_stall_state(ledger, state["stalled"])
+    record_stall(manifest, ledger)
 
     if receipt.get("outcome") == "infra_error" or returncode != 0:
         return EXIT_INFRA
     return EXIT_OK
+
+
+def record_stall(manifest, ledger):
+    """Cache stall state and print LOOP_STALLED once when a tick becomes stalled.
+
+    Every path that appends a receipt, including infrastructure failures, must
+    call this. An early return that skips it leaves status stalled while the
+    cached bit stays false.
+    """
+    rows, _, health_rows = scan_ledger(ledger)
+    state = compute_state(
+        rows, manifest.get("progress_budget_seconds"), health=manifest.get("health"),
+        health_rows=health_rows,
+    )
+    previous = read_stall_state(ledger)
+    if state["stalled"] and not previous.get("stalled"):
+        print(stall_line(manifest, state))
+    write_stall_state(ledger, state["stalled"])
+    return state
+
+
+def stall_line(manifest, state):
+    health = manifest.get("health")
+    if health:
+        return (
+            f"{STALL_PREFIX}loop={manifest['loop']} healthy=false "
+            f"metric={health['metric']} op={health['op']} threshold={health['threshold']} "
+            f"max_age_seconds={health['max_age_seconds']} "
+            f"stop_rule: {manifest['stop_rule']}"
+        )
+    age = "never" if state["last_effect_at"] is None else state["last_effect_at"]
+    return (
+        f"{STALL_PREFIX}loop={manifest['loop']} last_effect_at={age} "
+        f"progress_budget_seconds={manifest['progress_budget_seconds']} "
+        f"stop_rule: {manifest['stop_rule']}"
+    )
 
 
 def synth_receipt(manifest, outcome, detail, missing):
@@ -464,8 +708,12 @@ def cmd_status(argv):
                               "error": "; ".join(errors)}))
             failed = True
             continue
-        rows, corrupt = read_ledger(expand_ledger(manifest))
-        state = compute_state(rows, manifest["progress_budget_seconds"])
+        ledger = expand_ledger(manifest)
+        rows, corrupt, health_rows = scan_ledger(ledger)
+        state = compute_state(
+            rows, manifest.get("progress_budget_seconds"), health=manifest.get("health"),
+            health_rows=health_rows,
+        )
         record = {
             "loop": manifest["loop"],
             "manifest": str(pathlib.Path(os.path.expanduser(str(manifest_path))).resolve()),

@@ -673,5 +673,430 @@ class LedgerReaderTests(unittest.TestCase):
         self.assertEqual((rows, corrupt), ([], 0))
 
 
+HEALTH = {
+    "metric": "canary_ok",
+    "op": "gte",
+    "threshold": 1,
+    "max_age_seconds": 7200,
+}
+
+
+class HealthSloTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.ledger = self.dir / "ledger" / "receipts.jsonl"
+        self.now = dt.datetime.now(dt.timezone.utc)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def fresh(self, **kwargs):
+        kwargs.setdefault("run", self.now.isoformat(timespec="seconds"))
+        return receipt(**kwargs)
+
+    def test_null_budget_requires_health(self):
+        path = write_manifest(self.dir, progress_budget_seconds=None)
+        _, errors = loop.load_manifest(path)
+        self.assertTrue(any("null is only valid when health is set" in e for e in errors))
+
+    def test_health_manifest_allows_null_budget(self):
+        path = write_manifest(self.dir, progress_budget_seconds=None, health=HEALTH)
+        _, errors = loop.load_manifest(path)
+        self.assertEqual(errors, [])
+
+    def test_health_rejects_bad_op_and_bool_threshold(self):
+        path = write_manifest(self.dir, health={**HEALTH, "op": "includes", "threshold": True})
+        _, errors = loop.load_manifest(path)
+        self.assertTrue(any("health.op" in e for e in errors))
+        self.assertTrue(any("health.threshold" in e for e in errors))
+
+    def test_receipt_rejects_bool_metric_value(self):
+        payload = json.dumps(receipt(metrics={"canary_ok": True}))
+        parsed, problem = loop.validate_receipt(payload)
+        self.assertIsNone(parsed)
+        self.assertIn("metrics.canary_ok", problem)
+
+    def test_passing_sample_with_empty_effects_is_not_stalled(self):
+        rows = [self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 1})]
+        state = loop.compute_state(rows, None, now=self.now, health=HEALTH)
+        self.assertTrue(state["healthy"])
+        self.assertFalse(state["stalled"])
+        self.assertIsNone(state["last_effect_at"])
+
+    def test_failing_sample_is_stalled(self):
+        rows = [self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 0})]
+        state = loop.compute_state(rows, None, now=self.now, health=HEALTH)
+        self.assertFalse(state["healthy"])
+        self.assertTrue(state["stalled"])
+
+    def test_missing_metric_is_not_healthy(self):
+        rows = [self.fresh(outcome="measured", effects=[])]
+        state = loop.compute_state(rows, None, now=self.now, health=HEALTH)
+        self.assertFalse(state["healthy"])
+        self.assertTrue(state["stalled"])
+
+    def test_stale_pass_is_stalled(self):
+        old = (self.now - dt.timedelta(seconds=7201)).isoformat(timespec="seconds")
+        rows = [receipt(outcome="measured", run=old, metrics={"canary_ok": 1})]
+        state = loop.compute_state(rows, None, now=self.now, health=HEALTH)
+        self.assertFalse(state["healthy"])
+        self.assertTrue(state["stalled"])
+
+    def test_infra_error_after_pass_is_not_healthy(self):
+        rows = [
+            self.fresh(outcome="measured", metrics={"canary_ok": 1}),
+            receipt(outcome="infra_error", run=(self.now + dt.timedelta(seconds=1)).isoformat(timespec="seconds"),
+                    error="logging read failed"),
+        ]
+        state = loop.compute_state(rows, None, now=self.now + dt.timedelta(seconds=1), health=HEALTH)
+        self.assertFalse(state["healthy"])
+        self.assertTrue(state["stalled"])
+
+    def test_health_overrides_a_numeric_progress_budget(self):
+        rows = [self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 1})]
+        state = loop.compute_state(rows, 1, now=self.now, health=HEALTH)
+        self.assertTrue(state["healthy"])
+        self.assertFalse(state["stalled"])
+
+    def test_metrics_do_not_count_as_progress_without_health(self):
+        rows = [self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 1})]
+        state = loop.compute_state(rows, 3600, now=self.now)
+        self.assertTrue(state["stalled"])
+        self.assertNotIn("healthy", state)
+
+    def test_tick_pass_does_not_escalate_and_fail_does(self):
+        manifest = write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger),
+        )
+        passed = echo_receipt_cmd(
+            self.dir,
+            [receipt_echo_line(outcome="measured", effects=[], metrics={"canary_ok": 1})],
+            "pass.sh",
+        )
+        p1 = run_loop("tick", str(manifest), "--", *passed)
+        self.assertEqual(p1.returncode, 0, p1.stderr)
+        self.assertNotIn("LOOP_STALLED", p1.stdout)
+        status = run_loop("status", str(manifest))
+        record = json.loads(status.stdout.strip().splitlines()[0])
+        self.assertTrue(record["healthy"])
+        self.assertFalse(record["stalled"])
+
+        failed = echo_receipt_cmd(
+            self.dir,
+            [receipt_echo_line(outcome="measured", effects=[], metrics={"canary_ok": 0})],
+            "fail.sh",
+        )
+        p2 = run_loop("tick", str(manifest), "--", *failed)
+        self.assertEqual(p2.returncode, 0, p2.stderr)
+        self.assertIn("LOOP_STALLED", p2.stdout)
+        self.assertIn("healthy=false", p2.stdout)
+        self.assertIn("metric=canary_ok", p2.stdout)
+
+    def test_correction_row_does_not_replace_the_health_sample(self):
+        passed = self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        later = (self.now + dt.timedelta(minutes=5)).isoformat(timespec="seconds")
+        correction = receipt(
+            outcome="no_op", run=later, effects=[],
+            invalidates_effects=[{"run": passed["run"], "ref": "file:///old"}],
+        )
+        state = loop.compute_state(
+            [passed, correction], None, now=self.now + dt.timedelta(minutes=5), health=HEALTH,
+        )
+        self.assertEqual(state["last_outcome"], "no_op")
+        self.assertTrue(state["healthy"])
+        self.assertFalse(state["stalled"])
+
+        failed = self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 0})
+        state_fail = loop.compute_state(
+            [failed, correction], None, now=self.now + dt.timedelta(minutes=5), health=HEALTH,
+        )
+        self.assertFalse(state_fail["healthy"])
+        self.assertTrue(state_fail["stalled"])
+
+    def test_failed_correction_does_not_hide_an_earlier_pass(self):
+        manifest = write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger),
+        )
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        passed = receipt(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        self.ledger.write_text(loop.RECEIPT_PREFIX + json.dumps(passed) + "\n")
+        correction = receipt_echo_line(
+            outcome="no_op", effects=[],
+            invalidates_effects=[{"run": passed["run"], "ref": "file:///old"}],
+        )
+        script = self.dir / "fail-correction.sh"
+        script.write_text("#!/bin/sh\n" + correction + "\nexit 1\n")
+        script.chmod(0o755)
+        proc = run_loop("tick", str(manifest), "--", str(script))
+        self.assertEqual(proc.returncode, 5, proc.stderr)
+        status = json.loads(run_loop("status", str(manifest)).stdout.strip().splitlines()[0])
+        self.assertEqual(status["last_outcome"], "infra_error")
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["stalled"])
+
+        failing = self.fresh(
+            outcome="measured", effects=[], metrics={"canary_ok": 0},
+            invalidates_effects=[{"run": passed["run"], "ref": "file:///old"}],
+        )
+        direct = loop.compute_state(
+            [passed, failing], None, now=self.now, health=HEALTH,
+        )
+        self.assertFalse(direct["healthy"])
+        self.assertTrue(direct["stalled"])
+
+    def test_invalid_latest_sample_does_not_fall_back_to_an_older_pass(self):
+        manifest = write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger),
+        )
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        good = receipt(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        bad = receipt(
+            outcome="measured", effects=[],
+            metrics={"canary_ok": 0, "optional": None},
+        )
+        self.ledger.write_text(
+            loop.RECEIPT_PREFIX + json.dumps(good) + "\n"
+            + loop.RECEIPT_PREFIX + json.dumps(bad) + "\n"
+        )
+        proc = run_loop("status", str(manifest))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        status = json.loads(proc.stdout.strip().splitlines()[0])
+        self.assertEqual(status["corrupt_rows"], 1)
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["stalled"])
+
+    def test_future_timestamp_does_not_mask_a_later_failure(self):
+        tomorrow = (self.now + dt.timedelta(days=1)).isoformat(timespec="seconds")
+        future_pass = receipt(outcome="measured", run=tomorrow, effects=[], metrics={"canary_ok": 1})
+        current_fail = self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 0})
+        masked = loop.compute_state(
+            [future_pass, current_fail], None, now=self.now, health=HEALTH,
+        )
+        self.assertFalse(masked["healthy"])
+        self.assertTrue(masked["stalled"])
+        lone = loop.compute_state([future_pass], None, now=self.now, health=HEALTH)
+        self.assertFalse(lone["healthy"])
+        self.assertTrue(lone["stalled"])
+        skewed = receipt(
+            outcome="measured", effects=[], metrics={"canary_ok": 1},
+            run=(self.now + dt.timedelta(seconds=60)).isoformat(timespec="seconds"),
+        )
+        within = loop.compute_state([skewed], None, now=self.now, health=HEALTH)
+        self.assertTrue(within["healthy"])
+        self.assertFalse(within["stalled"])
+
+    def test_nonfinite_metric_does_not_satisfy_slo(self):
+        payload = json.dumps(receipt(outcome="measured", effects=[], metrics={"canary_ok": float("nan")}))
+        parsed, problem = loop.validate_receipt(payload)
+        self.assertIsNone(parsed)
+        self.assertIn("finite", problem)
+        _, errors = loop.load_manifest(write_manifest(
+            self.dir, health={**HEALTH, "op": "ne", "threshold": float("inf")},
+        ))
+        self.assertTrue(any("health.threshold" in error for error in errors))
+        nan_row = receipt(outcome="measured", effects=[], metrics={"canary_ok": float("nan")})
+        state = loop.compute_state(
+            [nan_row], None, now=self.now,
+            health={**HEALTH, "op": "ne", "threshold": 0},
+        )
+        self.assertFalse(state["healthy"])
+        self.assertTrue(state["stalled"])
+
+    def _status_after(self, lines):
+        manifest = write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger),
+        )
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        self.ledger.write_text("".join(line if line.endswith("\n") else line + "\n" for line in lines))
+        proc = run_loop("status", str(manifest))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout.strip().splitlines()[0])
+
+    def test_correction_does_not_clear_an_invalid_metric_sample(self):
+        passed = receipt(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        bad = receipt(
+            outcome="measured", effects=[],
+            metrics={"canary_ok": 0, "optional": None},
+        )
+        correction = receipt(
+            outcome="no_op", effects=[],
+            invalidates_effects=[{"run": passed["run"], "ref": "file:///old"}],
+        )
+        status = self._status_after([
+            loop.RECEIPT_PREFIX + json.dumps(passed),
+            loop.RECEIPT_PREFIX + json.dumps(bad),
+            loop.RECEIPT_PREFIX + json.dumps(correction),
+        ])
+        self.assertEqual(status["corrupt_rows"], 1)
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["stalled"])
+
+    def test_correction_does_not_clear_malformed_json(self):
+        passed = receipt(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        correction = receipt(
+            outcome="no_op", effects=[],
+            invalidates_effects=[{"run": passed["run"], "ref": "file:///old"}],
+        )
+        status = self._status_after([
+            loop.RECEIPT_PREFIX + json.dumps(passed),
+            loop.RECEIPT_PREFIX + "{not-json",
+            loop.RECEIPT_PREFIX + json.dumps(correction),
+        ])
+        self.assertEqual(status["corrupt_rows"], 1)
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["stalled"])
+
+    def _health_manifest(self):
+        return write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger),
+        )
+
+    def _status_lines(self, manifest, lines):
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        self.ledger.write_text("".join(line if line.endswith("\n") else line + "\n" for line in lines))
+        proc = run_loop("status", str(manifest))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("TypeError", proc.stderr)
+        return json.loads(proc.stdout.strip().splitlines()[0])
+
+    def test_malformed_corrections_fail_closed_without_crashing(self):
+        manifest = self._health_manifest()
+        passed = receipt(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        prefix = loop.RECEIPT_PREFIX
+        shapes = [
+            receipt(outcome="no_op", effects=[], invalidates_effects=None),
+            receipt(outcome="no_op", effects=[], invalidates_effects=[
+                {"run": passed["run"], "ref": ["not-a-string"]},
+            ]),
+            receipt(outcome="no_op", effects=[], invalidates_effects=[None]),
+        ]
+        for bad in shapes:
+            parsed, problem = loop.validate_receipt(json.dumps(bad))
+            self.assertIsNone(parsed)
+            self.assertIn("invalidates_effects", problem)
+            status = self._status_lines(manifest, [
+                prefix + json.dumps(passed),
+                prefix + json.dumps(bad),
+            ])
+            self.assertEqual(status["corrupt_rows"], 1)
+            self.assertFalse(status["healthy"])
+            self.assertTrue(status["stalled"])
+
+        script = self.dir / "bad-correction.sh"
+        script.write_text(
+            "#!/bin/sh\n" + receipt_echo_line(
+                outcome="no_op", effects=[], invalidates_effects=None,
+            ) + "\n"
+        )
+        script.chmod(0o755)
+        self.ledger.write_text(prefix + json.dumps(passed) + "\n")
+        proc = run_loop("tick", str(manifest), "--", str(script))
+        self.assertEqual(proc.returncode, loop.EXIT_INFRA, proc.stderr)
+        self.assertNotIn("TypeError", proc.stderr)
+        status = json.loads(run_loop("status", str(manifest)).stdout.strip().splitlines()[0])
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["stalled"])
+
+    def _arm_healthy(self):
+        if self.ledger.exists():
+            self.ledger.unlink()
+        stall = self.ledger.with_name("receipts.stall.json")
+        if stall.exists():
+            stall.unlink()
+        manifest = self._health_manifest()
+        passed = echo_receipt_cmd(
+            self.dir,
+            [receipt_echo_line(outcome="measured", effects=[], metrics={"canary_ok": 1})],
+            "arm-pass.sh",
+        )
+        proc = run_loop("tick", str(manifest), "--", *passed)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("LOOP_STALLED", proc.stdout)
+        self.assertFalse(json.loads(stall.read_text())["stalled"])
+        return manifest, stall
+
+    def _assert_stall_transition(self, proc, manifest, stall, code):
+        self.assertEqual(proc.returncode, code, proc.stderr)
+        self.assertIn("LOOP_STALLED", proc.stdout)
+        self.assertEqual(proc.stdout.count("LOOP_STALLED"), 1)
+        self.assertTrue(json.loads(stall.read_text())["stalled"])
+        status = json.loads(run_loop("status", str(manifest)).stdout.strip().splitlines()[0])
+        self.assertTrue(status["stalled"])
+        self.assertFalse(status["healthy"])
+
+    def test_infra_failures_record_the_stall_transition(self):
+        manifest, stall = self._arm_healthy()
+        blocked = write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger), requires=["definitely-not-on-path-binary"],
+        )
+        first = run_loop("tick", str(blocked), "--", "/bin/echo", "should-not-run")
+        self._assert_stall_transition(first, blocked, stall, loop.EXIT_MISSING_BIN)
+        second = run_loop("tick", str(blocked), "--", "/bin/echo", "should-not-run")
+        self.assertEqual(second.returncode, loop.EXIT_MISSING_BIN)
+        self.assertNotIn("LOOP_STALLED", second.stdout)
+
+        manifest, stall = self._arm_healthy()
+        missing = run_loop("tick", str(manifest), "--", str(self.dir / "no-such-command"))
+        self._assert_stall_transition(missing, manifest, stall, loop.EXIT_INFRA)
+        again = run_loop("tick", str(manifest), "--", str(self.dir / "no-such-command"))
+        self.assertEqual(again.returncode, loop.EXIT_INFRA)
+        self.assertNotIn("LOOP_STALLED", again.stdout)
+
+        manifest, stall = self._arm_healthy()
+        silent = script_cmd(self.dir, "#!/bin/sh\nexit 1\n", name="silent.sh")
+        no_receipt = run_loop("tick", str(manifest), "--", *silent)
+        self._assert_stall_transition(no_receipt, manifest, stall, loop.EXIT_INFRA)
+
+        manifest, stall = self._arm_healthy()
+        invalid = script_cmd(self.dir, "#!/bin/sh\necho 'LOOP_RECEIPT {not json'\n", name="bad.sh")
+        bad = run_loop("tick", str(manifest), "--", *invalid)
+        self._assert_stall_transition(bad, manifest, stall, loop.EXIT_INFRA)
+
+
+class CorrectionEffectTests(unittest.TestCase):
+    def test_correction_excludes_named_effect_and_keeps_history(self):
+        run = "2026-10-13T12:31:27+00:00"
+        original = receipt(
+            outcome="acted", run=run,
+            effects=[
+                {"ref": "file:///bogus", "metric_before": 0, "metric_after": 7644},
+                {"ref": "https://github.com/example/pull/1", "metric_before": 10, "metric_after": 2},
+            ],
+        )
+        other = receipt(
+            outcome="acted", run="2026-10-14T01:00:00+00:00",
+            effects=[{"ref": "file:///bogus", "metric_before": 3, "metric_after": 1}],
+        )
+        before = json.dumps([original, other])
+        correction = receipt(
+            outcome="no_op", run="2026-10-14T11:42:14+00:00", effects=[],
+            invalidates_effects=[{"run": run, "ref": "file:///bogus"}],
+        )
+        now = dt.datetime(2026, 10, 14, 12, 0, tzinfo=dt.timezone.utc)
+        state = loop.compute_state([original, other, correction], 7 * 86400, now=now)
+        self.assertEqual(json.dumps([original, other]), before)
+        self.assertEqual(original["effects"][0]["ref"], "file:///bogus")
+        # The named effect is gone; the other ref on that run, and the same
+        # ref on a different run, still count.
+        self.assertEqual(state["effects_7d"], 2)
+        self.assertEqual(state["last_effect_at"], "2026-10-14T01:00:00+00:00")
+        self.assertFalse(state["stalled"])
+
+    def test_receipt_accepts_correction_shape(self):
+        parsed, problem = loop.validate_receipt(json.dumps(receipt(
+            outcome="no_op",
+            invalidates_effects=[{"run": "2026-10-13T12:31:27+00:00", "ref": "file:///bogus"}],
+        )))
+        self.assertIsNone(problem)
+        self.assertEqual(len(parsed["invalidates_effects"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
