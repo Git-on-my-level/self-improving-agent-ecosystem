@@ -22,7 +22,8 @@ or is older than `health.max_age_seconds`. A passing measurement is not
 stalled. The child's stdout is
 forwarded verbatim on the runner's stdout — for no-agent cron jobs that stdout
 is the chat delivery payload — and the runner's own bookkeeping (the PATH it
-saw, stall escalations) goes to stderr so a healthy silent tick stays silent.
+saw) goes to stderr so a healthy silent tick stays silent. Stall escalations
+go to stdout, once, on the transition into stalled.
 
 Transitional compatibility: some loops append their own receipt to the ledger
 and print nothing on healthy ticks (their stdout is a chat delivery payload).
@@ -39,8 +40,9 @@ Usage:
 
 Exit codes (tick): 0 healthy tick (any outcome except infra_error); 6 a
 `requires` binary is missing (nothing ran); 5 infra_error (missing/invalid
-receipt, nonzero exit). Stalled loops still exit 0 — the escalation line
-LOOP_STALLED on stdout is the page, and it fires once per stall transition.
+receipt, nonzero exit); 7 a retired manifest (nothing ran). Stalled loops
+still exit 0 — the escalation line LOOP_STALLED on stdout is the page, and
+it fires once per stall transition. Retired loops never emit it.
 """
 from __future__ import annotations
 
@@ -180,11 +182,17 @@ def load_manifest(path):
         not isinstance(command, list) or not command or not all(isinstance(a, str) for a in command)
     ):
         errors.append("command: must be a nonempty list of strings (used by `loop tick <manifest>`)")
+    if "retired" in data and not isinstance(data.get("retired"), bool):
+        errors.append("retired: must be a boolean")
     return data, errors
 
 
 def expand_ledger(manifest):
     return pathlib.Path(os.path.expanduser(manifest["ledger"]))
+
+
+def is_retired(manifest):
+    return manifest.get("retired") is True
 
 
 # ---------------------------------------------------------------- receipts
@@ -547,6 +555,14 @@ def cmd_tick(argv):
         for error in errors:
             print(f"manifest error: {error}", file=sys.stderr)
         return EXIT_MANIFEST
+    if is_retired(manifest):
+        when = manifest.get("retired_at")
+        when_bit = f" at {when}" if isinstance(when, str) and when.strip() else ""
+        print(
+            f"refusing to tick retired loop {manifest['loop']}{when_bit}",
+            file=sys.stderr,
+        )
+        return EXIT_MANIFEST
     command = rest or manifest.get("command")
     if not command:
         print("no command: pass `-- <cmd...>` or set \"command\" in the manifest", file=sys.stderr)
@@ -652,6 +668,8 @@ def record_stall(manifest, ledger):
     call this. An early return that skips it leaves status stalled while the
     cached bit stays false.
     """
+    if is_retired(manifest):
+        return {"stalled": False, "healthy": None, "retired": True}
     rows, _, health_rows = scan_ledger(ledger)
     state = compute_state(
         rows, manifest.get("progress_budget_seconds"), health=manifest.get("health"),
@@ -720,6 +738,12 @@ def cmd_status(argv):
             "archetype": manifest["archetype"],
         }
         record.update(state)
+        if is_retired(manifest):
+            # History stays visible, but a retired loop is not an action item.
+            # healthy is JSON null even when a health SLO would have failed.
+            record["retired"] = True
+            record["stalled"] = False
+            record["healthy"] = None
         if corrupt:
             record["corrupt_rows"] = corrupt
         print(json.dumps(record))
