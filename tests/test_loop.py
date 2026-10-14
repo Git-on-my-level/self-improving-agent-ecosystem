@@ -673,5 +673,127 @@ class LedgerReaderTests(unittest.TestCase):
         self.assertEqual((rows, corrupt), ([], 0))
 
 
+HEALTH = {
+    "metric": "canary_ok",
+    "op": "gte",
+    "threshold": 1,
+    "max_age_seconds": 7200,
+}
+
+
+class HealthSloTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.ledger = self.dir / "ledger" / "receipts.jsonl"
+        self.now = dt.datetime.now(dt.timezone.utc)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def fresh(self, **kwargs):
+        kwargs.setdefault("run", self.now.isoformat(timespec="seconds"))
+        return receipt(**kwargs)
+
+    def test_null_budget_requires_health(self):
+        path = write_manifest(self.dir, progress_budget_seconds=None)
+        _, errors = loop.load_manifest(path)
+        self.assertTrue(any("null is only valid when health is set" in e for e in errors))
+
+    def test_health_manifest_allows_null_budget(self):
+        path = write_manifest(self.dir, progress_budget_seconds=None, health=HEALTH)
+        _, errors = loop.load_manifest(path)
+        self.assertEqual(errors, [])
+
+    def test_health_rejects_bad_op_and_bool_threshold(self):
+        path = write_manifest(self.dir, health={**HEALTH, "op": "includes", "threshold": True})
+        _, errors = loop.load_manifest(path)
+        self.assertTrue(any("health.op" in e for e in errors))
+        self.assertTrue(any("health.threshold" in e for e in errors))
+
+    def test_receipt_rejects_bool_metric_value(self):
+        payload = json.dumps(receipt(metrics={"canary_ok": True}))
+        parsed, problem = loop.validate_receipt(payload)
+        self.assertIsNone(parsed)
+        self.assertIn("metrics.canary_ok", problem)
+
+    def test_passing_sample_with_empty_effects_is_not_stalled(self):
+        rows = [self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 1})]
+        state = loop.compute_state(rows, None, now=self.now, health=HEALTH)
+        self.assertTrue(state["healthy"])
+        self.assertFalse(state["stalled"])
+        self.assertIsNone(state["last_effect_at"])
+
+    def test_failing_sample_is_stalled(self):
+        rows = [self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 0})]
+        state = loop.compute_state(rows, None, now=self.now, health=HEALTH)
+        self.assertFalse(state["healthy"])
+        self.assertTrue(state["stalled"])
+
+    def test_missing_metric_is_not_healthy(self):
+        rows = [self.fresh(outcome="measured", effects=[])]
+        state = loop.compute_state(rows, None, now=self.now, health=HEALTH)
+        self.assertFalse(state["healthy"])
+        self.assertTrue(state["stalled"])
+
+    def test_stale_pass_is_stalled(self):
+        old = (self.now - dt.timedelta(seconds=7201)).isoformat(timespec="seconds")
+        rows = [receipt(outcome="measured", run=old, metrics={"canary_ok": 1})]
+        state = loop.compute_state(rows, None, now=self.now, health=HEALTH)
+        self.assertFalse(state["healthy"])
+        self.assertTrue(state["stalled"])
+
+    def test_infra_error_after_pass_is_not_healthy(self):
+        rows = [
+            self.fresh(outcome="measured", metrics={"canary_ok": 1}),
+            receipt(outcome="infra_error", run=(self.now + dt.timedelta(seconds=1)).isoformat(timespec="seconds"),
+                    error="logging read failed"),
+        ]
+        state = loop.compute_state(rows, None, now=self.now + dt.timedelta(seconds=1), health=HEALTH)
+        self.assertFalse(state["healthy"])
+        self.assertTrue(state["stalled"])
+
+    def test_health_overrides_a_numeric_progress_budget(self):
+        rows = [self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 1})]
+        state = loop.compute_state(rows, 1, now=self.now, health=HEALTH)
+        self.assertTrue(state["healthy"])
+        self.assertFalse(state["stalled"])
+
+    def test_metrics_do_not_count_as_progress_without_health(self):
+        rows = [self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 1})]
+        state = loop.compute_state(rows, 3600, now=self.now)
+        self.assertTrue(state["stalled"])
+        self.assertNotIn("healthy", state)
+
+    def test_tick_pass_does_not_escalate_and_fail_does(self):
+        manifest = write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger),
+        )
+        passed = echo_receipt_cmd(
+            self.dir,
+            [receipt_echo_line(outcome="measured", effects=[], metrics={"canary_ok": 1})],
+            "pass.sh",
+        )
+        p1 = run_loop("tick", str(manifest), "--", *passed)
+        self.assertEqual(p1.returncode, 0, p1.stderr)
+        self.assertNotIn("LOOP_STALLED", p1.stdout)
+        status = run_loop("status", str(manifest))
+        record = json.loads(status.stdout.strip().splitlines()[0])
+        self.assertTrue(record["healthy"])
+        self.assertFalse(record["stalled"])
+
+        failed = echo_receipt_cmd(
+            self.dir,
+            [receipt_echo_line(outcome="measured", effects=[], metrics={"canary_ok": 0})],
+            "fail.sh",
+        )
+        p2 = run_loop("tick", str(manifest), "--", *failed)
+        self.assertEqual(p2.returncode, 0, p2.stderr)
+        self.assertIn("LOOP_STALLED", p2.stdout)
+        self.assertIn("healthy=false", p2.stdout)
+        self.assertIn("metric=canary_ok", p2.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

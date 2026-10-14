@@ -27,12 +27,23 @@ Every loop proves its effect with three things:
      credential, unreadable source). A missing or invalid receipt counts as
      `infra_error`, never ok. Exit 0 is never evidence of a healthy tick.
 
+   Optional on any receipt: `"metrics": {"<name>": <number>}`. Watch loops
+   with a `health` SLO are judged on the named metric, not on `effects`.
+
 2. **A durable ledger.** `~/.hermes/state/loops/<loop-id>/receipts.jsonl` (or
    the owning repo) — never an ephemeral scratch volume.
 
-3. **A progress budget.** How long the loop may go without a receipt with
-   outcome `acted` or `measured` and nonempty `effects` before it is
-   **stalled**. Liveness (the cron fired) is not progress (the metric moved).
+3. **A progress budget, or a health SLO.** A loop that claims to move a
+   metric is **stalled** when it goes `progress_budget_seconds` without a
+   receipt whose outcome is `acted` or `measured` and whose `effects` is
+   nonempty. Liveness (the cron fired) is not progress (the metric moved).
+   A watch that only samples a signal sets `health` instead
+   (`metric`, `op`, `threshold`, `max_age_seconds`) and may set
+   `progress_budget_seconds` to null. Each receipt then carries
+   `"metrics": {"<metric>": <number>}`. Stalled means the latest sample
+   missed the threshold, is `infra_error`, omitted the metric, or is older
+   than `max_age_seconds`. A fresh passing sample is not stalled, even with
+   `effects: []`. A failing or missing sample must not read healthy.
 
 The manifest carries the declarations; `scripts/loop` enforces the mechanics.
 

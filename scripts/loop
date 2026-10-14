@@ -9,8 +9,12 @@ loop ends with ONE receipt line on stdout:
                   "open_items":n,"oldest_open_days":n,"preflight":{"<bin>":true}}
 
 The runner is the ledger writer. It captures the receipt, appends it to the
-manifest's durable JSONL ledger, and computes progress (`last_effect_at`) and
-stall state against the manifest's progress budget. The child's stdout is
+manifest's durable JSONL ledger, and computes stall state. Loops that move a
+metric stall when no `acted`/`measured` receipt with nonempty `effects` lands
+inside `progress_budget_seconds`. Watch loops set `health` instead: stall
+means the latest receipt missed that SLO, is `infra_error`, lacks the metric,
+or is older than `health.max_age_seconds`. A passing measurement is not
+stalled. The child's stdout is
 forwarded verbatim on the runner's stdout — for no-agent cron jobs that stdout
 is the chat delivery payload — and the runner's own bookkeeping (the PATH it
 saw, stall escalations) goes to stderr so a healthy silent tick stays silent.
@@ -50,6 +54,7 @@ OUTCOMES = ("acted", "measured", "no_op", "infra_error")
 ARCHETYPES = ("optimize", "maintain", "observe_propose")
 AUTHORITIES = ("propose", "pr", "merge", "deploy")
 EFFECT_OUTCOMES = ("acted", "measured")
+HEALTH_OPS = ("eq", "ne", "lt", "lte", "gt", "gte")
 SCHEMA_VERSION = 1
 EXIT_OK = 0
 EXIT_INFRA = 5
@@ -126,9 +131,36 @@ def load_manifest(path):
             errors.append("ledger: durable paths only, never an ephemeral scratch volume")
         if not expanded.endswith(".jsonl"):
             errors.append("ledger: must point to a .jsonl file")
-    budget = data.get("progress_budget_seconds")
-    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
-        errors.append("progress_budget_seconds: must be a positive integer")
+    health_errors_at = len(errors)
+    if "health" in data:
+        health = data.get("health")
+        if not isinstance(health, dict):
+            errors.append("health: must be an object")
+        else:
+            metric = health.get("metric")
+            if not isinstance(metric, str) or not metric.strip():
+                errors.append("health.metric: must be a nonempty string")
+            if health.get("op") not in HEALTH_OPS:
+                errors.append("health.op: must be one of " + ", ".join(HEALTH_OPS))
+            threshold = health.get("threshold")
+            if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+                errors.append("health.threshold: must be a number")
+            age = health.get("max_age_seconds")
+            if isinstance(age, bool) or not isinstance(age, int) or age <= 0:
+                errors.append("health.max_age_seconds: must be a positive integer")
+            unknown = sorted(set(health) - {"metric", "op", "threshold", "max_age_seconds"})
+            if unknown:
+                errors.append("health: unknown fields " + ", ".join(unknown))
+    health_ok = "health" in data and isinstance(data.get("health"), dict) and len(errors) == health_errors_at
+    if "progress_budget_seconds" not in data:
+        errors.append("progress_budget_seconds: missing or wrong type (want a positive integer, or null with health)")
+    else:
+        budget = data.get("progress_budget_seconds")
+        if budget is None:
+            if not health_ok:
+                errors.append("progress_budget_seconds: null is only valid when health is set")
+        elif isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+            errors.append("progress_budget_seconds: must be a positive integer or null when health is set")
     req("stop_rule", str, "nonempty")
     requires = data.get("requires", [])
     if not isinstance(requires, list) or not all(isinstance(b, str) and b for b in requires):
@@ -196,6 +228,15 @@ def validate_receipt(payload):
     preflight = receipt.get("preflight", {})
     if not isinstance(preflight, dict):
         return None, "preflight must be an object"
+    if "metrics" in receipt:
+        metrics = receipt.get("metrics")
+        if not isinstance(metrics, dict):
+            return None, "metrics must be an object"
+        for key, value in metrics.items():
+            if not isinstance(key, str) or not key:
+                return None, "metrics keys must be nonempty strings"
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None, f"metrics.{key} must be a number"
     return receipt, None
 
 
@@ -256,8 +297,60 @@ def missing_binaries(names):
 # ---------------------------------------------------------------- stall
 
 
-def compute_state(rows, budget_seconds, now=None):
-    """Collector state from ledger rows. rows must be in ledger (append) order."""
+def _health_compare(op, value, threshold):
+    if op == "eq":
+        return value == threshold
+    if op == "ne":
+        return value != threshold
+    if op == "lt":
+        return value < threshold
+    if op == "lte":
+        return value <= threshold
+    if op == "gt":
+        return value > threshold
+    if op == "gte":
+        return value >= threshold
+    return False
+
+
+def slo_healthy(rows, health, now):
+    """True only when the latest receipt is fresh, not infra_error, and meets the SLO.
+
+    A missing metric, a stale observation, or an infra_error is unhealthy: stalled
+    means needs action, and a watch must not look healthy without a passing sample.
+    """
+    latest = None
+    latest_at = None
+    for receipt in rows:
+        at = parse_time(receipt.get("run"))
+        if at is None:
+            continue
+        if latest_at is None or at >= latest_at:
+            latest = receipt
+            latest_at = at
+    if latest is None:
+        return False
+    if (now - latest_at).total_seconds() > health["max_age_seconds"]:
+        return False
+    if latest.get("outcome") == "infra_error":
+        return False
+    metrics = latest.get("metrics")
+    metric = health["metric"]
+    if not isinstance(metrics, dict) or metric not in metrics:
+        return False
+    value = metrics[metric]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return _health_compare(health["op"], value, health["threshold"])
+
+
+def compute_state(rows, budget_seconds, now=None, health=None):
+    """Collector state from ledger rows. rows must be in ledger (append) order.
+
+    Without `health`, stall is the progress budget (no acted/measured effect in
+    time). With `health`, stall is the SLO: a fresh passing measurement is not
+    stalled, even when `effects` is empty.
+    """
     now = now or dt.datetime.now(dt.timezone.utc)
     last_run = None
     last_outcome = None
@@ -284,15 +377,21 @@ def compute_state(rows, budget_seconds, now=None):
     effect_age = None
     if last_effect_at is not None:
         effect_age = (now - parse_time(last_effect_at)).total_seconds()
-    stalled = effect_age is None or effect_age > budget_seconds
-    return {
+    state = {
         "last_run": last_run,
         "last_outcome": last_outcome,
         "last_effect_at": last_effect_at,
         "effects_7d": effects_7d,
         "fail_streak": fail_streak,
-        "stalled": stalled,
     }
+    if health:
+        state["healthy"] = slo_healthy(rows, health, now)
+        state["stalled"] = not state["healthy"]
+    else:
+        state["stalled"] = (
+            budget_seconds is None or effect_age is None or effect_age > budget_seconds
+        )
+    return state
 
 
 def stall_state_path(ledger_path):
@@ -421,20 +520,32 @@ def cmd_tick(argv):
 
     # Stall bookkeeping against the whole ledger.
     rows, _ = read_ledger(ledger)
-    state = compute_state(rows, manifest["progress_budget_seconds"])
+    state = compute_state(rows, manifest.get("progress_budget_seconds"), health=manifest.get("health"))
     previous = read_stall_state(ledger)
     if state["stalled"] and not previous.get("stalled"):
-        age = "never" if state["last_effect_at"] is None else state["last_effect_at"]
-        print(
-            f"{STALL_PREFIX}loop={manifest['loop']} last_effect_at={age} "
-            f"progress_budget_seconds={manifest['progress_budget_seconds']} "
-            f"stop_rule: {manifest['stop_rule']}"
-        )
+        print(stall_line(manifest, state))
     write_stall_state(ledger, state["stalled"])
 
     if receipt.get("outcome") == "infra_error" or returncode != 0:
         return EXIT_INFRA
     return EXIT_OK
+
+
+def stall_line(manifest, state):
+    health = manifest.get("health")
+    if health:
+        return (
+            f"{STALL_PREFIX}loop={manifest['loop']} healthy=false "
+            f"metric={health['metric']} op={health['op']} threshold={health['threshold']} "
+            f"max_age_seconds={health['max_age_seconds']} "
+            f"stop_rule: {manifest['stop_rule']}"
+        )
+    age = "never" if state["last_effect_at"] is None else state["last_effect_at"]
+    return (
+        f"{STALL_PREFIX}loop={manifest['loop']} last_effect_at={age} "
+        f"progress_budget_seconds={manifest['progress_budget_seconds']} "
+        f"stop_rule: {manifest['stop_rule']}"
+    )
 
 
 def synth_receipt(manifest, outcome, detail, missing):
@@ -465,7 +576,9 @@ def cmd_status(argv):
             failed = True
             continue
         rows, corrupt = read_ledger(expand_ledger(manifest))
-        state = compute_state(rows, manifest["progress_budget_seconds"])
+        state = compute_state(
+            rows, manifest.get("progress_budget_seconds"), health=manifest.get("health")
+        )
         record = {
             "loop": manifest["loop"],
             "manifest": str(pathlib.Path(os.path.expanduser(str(manifest_path))).resolve()),
