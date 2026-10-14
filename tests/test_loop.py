@@ -951,6 +951,114 @@ class HealthSloTests(unittest.TestCase):
         self.assertFalse(status["healthy"])
         self.assertTrue(status["stalled"])
 
+    def _health_manifest(self):
+        return write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger),
+        )
+
+    def _status_lines(self, manifest, lines):
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        self.ledger.write_text("".join(line if line.endswith("\n") else line + "\n" for line in lines))
+        proc = run_loop("status", str(manifest))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("TypeError", proc.stderr)
+        return json.loads(proc.stdout.strip().splitlines()[0])
+
+    def test_malformed_corrections_fail_closed_without_crashing(self):
+        manifest = self._health_manifest()
+        passed = receipt(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        prefix = loop.RECEIPT_PREFIX
+        shapes = [
+            receipt(outcome="no_op", effects=[], invalidates_effects=None),
+            receipt(outcome="no_op", effects=[], invalidates_effects=[
+                {"run": passed["run"], "ref": ["not-a-string"]},
+            ]),
+            receipt(outcome="no_op", effects=[], invalidates_effects=[None]),
+        ]
+        for bad in shapes:
+            parsed, problem = loop.validate_receipt(json.dumps(bad))
+            self.assertIsNone(parsed)
+            self.assertIn("invalidates_effects", problem)
+            status = self._status_lines(manifest, [
+                prefix + json.dumps(passed),
+                prefix + json.dumps(bad),
+            ])
+            self.assertEqual(status["corrupt_rows"], 1)
+            self.assertFalse(status["healthy"])
+            self.assertTrue(status["stalled"])
+
+        script = self.dir / "bad-correction.sh"
+        script.write_text(
+            "#!/bin/sh\n" + receipt_echo_line(
+                outcome="no_op", effects=[], invalidates_effects=None,
+            ) + "\n"
+        )
+        script.chmod(0o755)
+        self.ledger.write_text(prefix + json.dumps(passed) + "\n")
+        proc = run_loop("tick", str(manifest), "--", str(script))
+        self.assertEqual(proc.returncode, loop.EXIT_INFRA, proc.stderr)
+        self.assertNotIn("TypeError", proc.stderr)
+        status = json.loads(run_loop("status", str(manifest)).stdout.strip().splitlines()[0])
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["stalled"])
+
+    def _arm_healthy(self):
+        if self.ledger.exists():
+            self.ledger.unlink()
+        stall = self.ledger.with_name("receipts.stall.json")
+        if stall.exists():
+            stall.unlink()
+        manifest = self._health_manifest()
+        passed = echo_receipt_cmd(
+            self.dir,
+            [receipt_echo_line(outcome="measured", effects=[], metrics={"canary_ok": 1})],
+            "arm-pass.sh",
+        )
+        proc = run_loop("tick", str(manifest), "--", *passed)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("LOOP_STALLED", proc.stdout)
+        self.assertFalse(json.loads(stall.read_text())["stalled"])
+        return manifest, stall
+
+    def _assert_stall_transition(self, proc, manifest, stall, code):
+        self.assertEqual(proc.returncode, code, proc.stderr)
+        self.assertIn("LOOP_STALLED", proc.stdout)
+        self.assertEqual(proc.stdout.count("LOOP_STALLED"), 1)
+        self.assertTrue(json.loads(stall.read_text())["stalled"])
+        status = json.loads(run_loop("status", str(manifest)).stdout.strip().splitlines()[0])
+        self.assertTrue(status["stalled"])
+        self.assertFalse(status["healthy"])
+
+    def test_infra_failures_record_the_stall_transition(self):
+        manifest, stall = self._arm_healthy()
+        blocked = write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger), requires=["definitely-not-on-path-binary"],
+        )
+        first = run_loop("tick", str(blocked), "--", "/bin/echo", "should-not-run")
+        self._assert_stall_transition(first, blocked, stall, loop.EXIT_MISSING_BIN)
+        second = run_loop("tick", str(blocked), "--", "/bin/echo", "should-not-run")
+        self.assertEqual(second.returncode, loop.EXIT_MISSING_BIN)
+        self.assertNotIn("LOOP_STALLED", second.stdout)
+
+        manifest, stall = self._arm_healthy()
+        missing = run_loop("tick", str(manifest), "--", str(self.dir / "no-such-command"))
+        self._assert_stall_transition(missing, manifest, stall, loop.EXIT_INFRA)
+        again = run_loop("tick", str(manifest), "--", str(self.dir / "no-such-command"))
+        self.assertEqual(again.returncode, loop.EXIT_INFRA)
+        self.assertNotIn("LOOP_STALLED", again.stdout)
+
+        manifest, stall = self._arm_healthy()
+        silent = script_cmd(self.dir, "#!/bin/sh\nexit 1\n", name="silent.sh")
+        no_receipt = run_loop("tick", str(manifest), "--", *silent)
+        self._assert_stall_transition(no_receipt, manifest, stall, loop.EXIT_INFRA)
+
+        manifest, stall = self._arm_healthy()
+        invalid = script_cmd(self.dir, "#!/bin/sh\necho 'LOOP_RECEIPT {not json'\n", name="bad.sh")
+        bad = run_loop("tick", str(manifest), "--", *invalid)
+        self._assert_stall_transition(bad, manifest, stall, loop.EXIT_INFRA)
+
 
 class CorrectionEffectTests(unittest.TestCase):
     def test_correction_excludes_named_effect_and_keeps_history(self):

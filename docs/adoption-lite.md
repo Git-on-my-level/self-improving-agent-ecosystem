@@ -31,6 +31,8 @@ Every loop proves its effect with three things:
    with a `health` SLO are judged on the named metric, not on `effects`.
 
    Optional on any receipt: `"invalidates_effects":[{"run":"<iso8601>","ref":"<url>"}]`.
+   Each entry is an object with a string `run` and a string `ref`. A null
+   list, a null entry, or a non-string ref makes the whole receipt invalid.
    A later row uses this to drop earlier effects from counting, matched on
    `loop` + `run` + `ref`. The historical row stays as written. Dropped
    effects no longer count toward `effects_7d` or `last_effect_at`. A

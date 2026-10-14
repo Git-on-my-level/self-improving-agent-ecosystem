@@ -243,6 +243,17 @@ def validate_receipt(payload):
                 return None, "metrics keys must be nonempty strings"
             if not _is_finite_number(value):
                 return None, f"metrics.{key} must be a finite number"
+    if "invalidates_effects" in receipt:
+        items = receipt.get("invalidates_effects")
+        if not isinstance(items, list):
+            return None, "invalidates_effects must be a list"
+        for item in items:
+            if not isinstance(item, dict):
+                return None, "invalidates_effects entries must be objects"
+            run = item.get("run")
+            ref = item.get("ref")
+            if not isinstance(run, str) or not run or not isinstance(ref, str) or not ref:
+                return None, "invalidates_effects entries need string run and string ref"
     return receipt, None
 
 
@@ -422,9 +433,20 @@ def compute_state(rows, budget_seconds, now=None, health=None, health_rows=None)
     now = now or dt.datetime.now(dt.timezone.utc)
     last_run = last_outcome = last_effect_at = None
     effects_7d = fail_streak = 0
-    invalidated = {(row.get("loop"), item.get("run"), item.get("ref"))
-                   for row in rows for item in row.get("invalidates_effects", [])
-                   if isinstance(item, dict)}
+    invalidated = set()
+    for row in rows:
+        items = row.get("invalidates_effects", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = (row.get("loop"), item.get("run"), item.get("ref"))
+            try:
+                hash(key)
+            except TypeError:
+                continue
+            invalidated.add(key)
     windows = {}
     latest = {}
     legacy = []
@@ -539,6 +561,7 @@ def cmd_tick(argv):
                                 f"missing binaries: {', '.join(missing)}", missing)
         append_receipt(ledger, receipt)
         print(RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":")))
+        record_stall(manifest, ledger)
         return EXIT_MISSING_BIN
 
     prior_count = len(read_ledger(ledger)[0])
@@ -554,6 +577,7 @@ def cmd_tick(argv):
             receipt = synth_receipt(manifest, "infra_error", f"failed to start: {exc}", [])
             append_receipt(ledger, receipt)
             print(RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":")))
+            record_stall(manifest, ledger)
             return EXIT_INFRA
         stdout = out_path.read_text()
         stderr = err_path.read_text()
@@ -611,9 +635,23 @@ def cmd_tick(argv):
         print(f"infra_error: {reason}", file=sys.stderr)
         receipt = synth_receipt(manifest, "infra_error", reason, [])
         append_receipt(ledger, receipt)
+        record_stall(manifest, ledger)
         return EXIT_INFRA
 
-    # Stall bookkeeping against the whole ledger.
+    record_stall(manifest, ledger)
+
+    if receipt.get("outcome") == "infra_error" or returncode != 0:
+        return EXIT_INFRA
+    return EXIT_OK
+
+
+def record_stall(manifest, ledger):
+    """Cache stall state and print LOOP_STALLED once when a tick becomes stalled.
+
+    Every path that appends a receipt, including infrastructure failures, must
+    call this. An early return that skips it leaves status stalled while the
+    cached bit stays false.
+    """
     rows, _, health_rows = scan_ledger(ledger)
     state = compute_state(
         rows, manifest.get("progress_budget_seconds"), health=manifest.get("health"),
@@ -623,10 +661,7 @@ def cmd_tick(argv):
     if state["stalled"] and not previous.get("stalled"):
         print(stall_line(manifest, state))
     write_stall_state(ledger, state["stalled"])
-
-    if receipt.get("outcome") == "infra_error" or returncode != 0:
-        return EXIT_INFRA
-    return EXIT_OK
+    return state
 
 
 def stall_line(manifest, state):

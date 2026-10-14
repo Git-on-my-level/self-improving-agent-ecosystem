@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/loop-manifest.schema.json",
   "title": "Lite loop manifest",
-  "description": "The minimal contract that makes an existing cron loop provable: one archetype, one goal metric, one receipt per tick, a durable ledger, and a progress budget or a health SLO. A receipt may carry invalidates_effects ([{run, ref}]) so a later row drops those effects from counting, matched on loop+run+ref, without rewriting the historical row. A row that carries invalidates_effects is a correction, not a health sample. Roles, identities, and the full ecosystem.json planes stay optional.",
+  "description": "The minimal contract that makes an existing cron loop provable: one archetype, one goal metric, one receipt per tick, a durable ledger, and a progress budget or a health SLO. A receipt may carry invalidates_effects (a list of objects with string run and string ref) so a later row drops those effects from counting, matched on loop+run+ref, without rewriting the historical row. A malformed list makes the receipt invalid. A successful correction-only row is not a health sample. Roles, identities, and the full ecosystem.json planes stay optional.",
   "type": "object",
   "required": ["schema_version", "loop", "host", "archetype", "goal_metric", "authority", "ledger", "progress_budget_seconds", "stop_rule"],
   "additionalProperties": true,
