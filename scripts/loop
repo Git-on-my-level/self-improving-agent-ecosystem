@@ -10,7 +10,8 @@ loop ends with ONE receipt line on stdout:
 
 A later row may carry "invalidates_effects":[{"run":"<iso8601>","ref":"<url>"}].
 Those effects, matched on loop+run+ref, drop out of effect counting. The
-historical row is left as written. A correction row is not a health sample.
+historical row is left as written. A successful correction-only row is not a
+health sample, and it does not clear an earlier invalid sample.
 
 The runner is the ledger writer. It captures the receipt, appends it to the
 manifest's durable JSONL ledger, and computes stall state. Loops that move a
@@ -249,47 +250,39 @@ def has_effects(receipt):
     return receipt.get("outcome") in EFFECT_OUTCOMES and bool(receipt.get("effects"))
 
 
-def read_ledger(ledger_path):
-    """Parse a JSONL ledger of receipts; skip corrupt rows. (rows, corrupt_count)."""
+def scan_ledger(ledger_path):
+    """Parse a JSONL ledger in append order.
+
+    `rows` keeps valid receipts for effect counting. `health_rows` keeps the
+    same order and uses None for an unparseable line, so health can fail
+    closed on that sample even when a later correction follows it.
+    """
     rows = []
+    health_rows = []
     corrupt = 0
     try:
         text = ledger_path.read_text()
     except OSError:
-        return rows, corrupt
+        return rows, corrupt, health_rows
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
         payload = line[len(RECEIPT_PREFIX):] if line.startswith(RECEIPT_PREFIX) else line
-        receipt, problem = validate_receipt(payload)
+        receipt, _problem = validate_receipt(payload)
         if receipt is None:
             corrupt += 1
+            health_rows.append(None)
             continue
         rows.append(receipt)
+        health_rows.append(receipt)
+    return rows, corrupt, health_rows
+
+
+def read_ledger(ledger_path):
+    """Parse a JSONL ledger of receipts; skip corrupt rows. (rows, corrupt_count)."""
+    rows, corrupt, _health_rows = scan_ledger(ledger_path)
     return rows, corrupt
-
-
-def ledger_tail_invalid(ledger_path):
-    """True when the last non-empty ledger line is not a valid receipt.
-
-    Health must fail closed on that line. Skipping it and reusing an older
-    pass would hide a broken latest sample. Effect counting still ignores it.
-    """
-    try:
-        text = ledger_path.read_text()
-    except OSError:
-        return False
-    last = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped:
-            last = stripped
-    if last is None:
-        return False
-    payload = last[len(RECEIPT_PREFIX):] if last.startswith(RECEIPT_PREFIX) else last
-    receipt, _problem = validate_receipt(payload)
-    return receipt is None
 
 
 def append_receipt(ledger_path, receipt):
@@ -369,22 +362,27 @@ def _successful_correction_only(receipt, health):
     return True
 
 
-def slo_healthy(rows, health, now, invalid_tail=False):
+def slo_healthy(rows, health, now):
     """True only when the latest append-order sample is fresh and meets the SLO.
 
-    Latest is the last row in ledger order, not the greatest timestamp.
-    Successful correction-only rows are skipped. An invalid tail, a future
-    timestamp beyond the skew bound, a non-finite metric, or a missed SLO
-    is unhealthy and does not fall back to an older pass.
+    Latest is the last sample in ledger order, not the greatest timestamp.
+    None is an unparseable row and is itself an unhealthy sample. A later
+    successful correction-only row is skipped and does not clear that sample.
+    A future timestamp beyond the skew bound, a non-finite metric, or a
+    missed SLO is unhealthy and does not fall back to an older pass.
     """
-    if invalid_tail:
-        return False
     latest = None
+    saw_sample = False
     for receipt in rows:
+        if receipt is None:
+            latest = None
+            saw_sample = True
+            continue
         if _successful_correction_only(receipt, health):
             continue
         latest = receipt
-    if latest is None:
+        saw_sample = True
+    if not saw_sample or latest is None:
         return False
     at = parse_time(latest.get("run"))
     if at is None:
@@ -409,7 +407,7 @@ def slo_healthy(rows, health, now, invalid_tail=False):
     return _health_compare(health["op"], value, threshold)
 
 
-def compute_state(rows, budget_seconds, now=None, health=None, invalid_tail=False):
+def compute_state(rows, budget_seconds, now=None, health=None, health_rows=None):
     """Count goal improvements by fingerprint/window; latest group state wins.
 
     Legacy non-group effects retain their contract. Corrections cannot refresh a
@@ -419,6 +417,7 @@ def compute_state(rows, budget_seconds, now=None, health=None, invalid_tail=Fals
     Without `health`, stall is the progress budget. With `health`, stall is the
     SLO: a fresh passing measurement is not stalled, even with empty effects.
     Only a successful correction-only row is left out of the health sample.
+    An invalid row stays in that order, so a later correction cannot clear it.
     """
     now = now or dt.datetime.now(dt.timezone.utc)
     last_run = last_outcome = last_effect_at = None
@@ -485,7 +484,7 @@ def compute_state(rows, budget_seconds, now=None, health=None, invalid_tail=Fals
         result["measurements_7d"] = measurements_7d
         result["reopened_groups"] = sum(effect.get("verdict") == "reopened" for _, effect in latest.values())
     if health:
-        result["healthy"] = slo_healthy(rows, health, now, invalid_tail=invalid_tail)
+        result["healthy"] = slo_healthy(rows if health_rows is None else health_rows, health, now)
         result["stalled"] = not result["healthy"]
     return result
 
@@ -615,10 +614,10 @@ def cmd_tick(argv):
         return EXIT_INFRA
 
     # Stall bookkeeping against the whole ledger.
-    rows, _ = read_ledger(ledger)
+    rows, _, health_rows = scan_ledger(ledger)
     state = compute_state(
         rows, manifest.get("progress_budget_seconds"), health=manifest.get("health"),
-        invalid_tail=ledger_tail_invalid(ledger),
+        health_rows=health_rows,
     )
     previous = read_stall_state(ledger)
     if state["stalled"] and not previous.get("stalled"):
@@ -675,10 +674,10 @@ def cmd_status(argv):
             failed = True
             continue
         ledger = expand_ledger(manifest)
-        rows, corrupt = read_ledger(ledger)
+        rows, corrupt, health_rows = scan_ledger(ledger)
         state = compute_state(
             rows, manifest.get("progress_budget_seconds"), health=manifest.get("health"),
-            invalid_tail=ledger_tail_invalid(ledger),
+            health_rows=health_rows,
         )
         record = {
             "loop": manifest["loop"],

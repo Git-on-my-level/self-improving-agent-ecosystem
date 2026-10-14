@@ -906,6 +906,51 @@ class HealthSloTests(unittest.TestCase):
         self.assertFalse(state["healthy"])
         self.assertTrue(state["stalled"])
 
+    def _status_after(self, lines):
+        manifest = write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger),
+        )
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        self.ledger.write_text("".join(line if line.endswith("\n") else line + "\n" for line in lines))
+        proc = run_loop("status", str(manifest))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout.strip().splitlines()[0])
+
+    def test_correction_does_not_clear_an_invalid_metric_sample(self):
+        passed = receipt(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        bad = receipt(
+            outcome="measured", effects=[],
+            metrics={"canary_ok": 0, "optional": None},
+        )
+        correction = receipt(
+            outcome="no_op", effects=[],
+            invalidates_effects=[{"run": passed["run"], "ref": "file:///old"}],
+        )
+        status = self._status_after([
+            loop.RECEIPT_PREFIX + json.dumps(passed),
+            loop.RECEIPT_PREFIX + json.dumps(bad),
+            loop.RECEIPT_PREFIX + json.dumps(correction),
+        ])
+        self.assertEqual(status["corrupt_rows"], 1)
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["stalled"])
+
+    def test_correction_does_not_clear_malformed_json(self):
+        passed = receipt(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        correction = receipt(
+            outcome="no_op", effects=[],
+            invalidates_effects=[{"run": passed["run"], "ref": "file:///old"}],
+        )
+        status = self._status_after([
+            loop.RECEIPT_PREFIX + json.dumps(passed),
+            loop.RECEIPT_PREFIX + "{not-json",
+            loop.RECEIPT_PREFIX + json.dumps(correction),
+        ])
+        self.assertEqual(status["corrupt_rows"], 1)
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["stalled"])
+
 
 class CorrectionEffectTests(unittest.TestCase):
     def test_correction_excludes_named_effect_and_keeps_history(self):

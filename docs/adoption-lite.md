@@ -54,9 +54,9 @@ Every loop proves its effect with three things:
    `effects: []`. A failing or missing sample must not read healthy. The
    sample is the last row in append order. A timestamp more than 300s in
    the future is invalid. Metric values and the threshold are finite
-   numbers; an unparseable latest row fails closed instead of revealing
-   an older pass. A successful correction-only row does not become that
-   sample.
+   numbers; an unparseable row is an unhealthy sample in its position.
+   A later successful correction-only row is skipped and does not clear
+   that sample or reveal an older pass.
 
 The manifest carries the declarations; `scripts/loop` enforces the mechanics.
 
