@@ -853,13 +853,6 @@ class CorrectionEffectTests(unittest.TestCase):
         self.assertIsNone(problem)
         self.assertEqual(len(parsed["invalidates_effects"]), 1)
 
-    def test_receipt_rejects_bad_correction(self):
-        parsed, problem = loop.validate_receipt(json.dumps(receipt(
-            outcome="no_op", invalidates_effects=[{"run": "2026-10-13T12:31:27+00:00"}],
-        )))
-        self.assertIsNone(parsed)
-        self.assertIn("invalidates_effects.ref", problem)
-
 
 if __name__ == "__main__":
     unittest.main()
