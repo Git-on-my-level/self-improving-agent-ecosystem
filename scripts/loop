@@ -8,6 +8,10 @@ loop ends with ONE receipt line on stdout:
                   "effects":[{"ref":"<url>","metric_before":n|null,"metric_after":n|null}],
                   "open_items":n,"oldest_open_days":n,"preflight":{"<bin>":true}}
 
+A later row may carry "invalidates_effects":[{"run":"<iso8601>","ref":"<url>"}].
+Those effects, matched on loop+run+ref, drop out of effect counting. The
+historical row is left as written. A correction row is not a health sample.
+
 The runner is the ledger writer. It captures the receipt, appends it to the
 manifest's durable JSONL ledger, and computes stall state. Loops that move a
 metric stall when no `acted`/`measured` receipt with nonempty `effects` lands
@@ -237,6 +241,17 @@ def validate_receipt(payload):
                 return None, "metrics keys must be nonempty strings"
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 return None, f"metrics.{key} must be a number"
+    if "invalidates_effects" in receipt:
+        items = receipt.get("invalidates_effects")
+        if not isinstance(items, list):
+            return None, "invalidates_effects must be a list"
+        for item in items:
+            if not isinstance(item, dict):
+                return None, "invalidates_effects entries must be objects"
+            if not isinstance(item.get("run"), str) or not item["run"]:
+                return None, "invalidates_effects.run must be a nonempty string"
+            if not isinstance(item.get("ref"), str) or not item["ref"]:
+                return None, "invalidates_effects.ref must be a nonempty string"
     return receipt, None
 
 
@@ -322,6 +337,11 @@ def slo_healthy(rows, health, now):
     latest = None
     latest_at = None
     for receipt in rows:
+        # A correction names effects to drop. It is not itself a health sample,
+        # so a later no_op correction cannot hide a passing or failing measurement.
+        items = receipt.get("invalidates_effects")
+        if isinstance(items, list) and items:
+            continue
         at = parse_time(receipt.get("run"))
         if at is None:
             continue
@@ -357,7 +377,13 @@ def compute_state(rows, budget_seconds, now=None, health=None):
     last_effect_at = None
     effects_7d = 0
     fail_streak = 0
-    for receipt in rows:
+    invalidated = {(row.get("loop"), item.get("run"), item.get("ref"))
+                   for row in rows for item in row.get("invalidates_effects", [])
+                   if isinstance(item, dict)}
+    for original in rows:
+        receipt = dict(original)
+        receipt["effects"] = [effect for effect in original.get("effects", [])
+                              if (original.get("loop"), original.get("run"), effect.get("ref")) not in invalidated]
         at = parse_time(receipt.get("run"))
         if at is None:
             continue

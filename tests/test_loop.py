@@ -794,6 +794,72 @@ class HealthSloTests(unittest.TestCase):
         self.assertIn("healthy=false", p2.stdout)
         self.assertIn("metric=canary_ok", p2.stdout)
 
+    def test_correction_row_does_not_replace_the_health_sample(self):
+        passed = self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        later = (self.now + dt.timedelta(minutes=5)).isoformat(timespec="seconds")
+        correction = receipt(
+            outcome="no_op", run=later, effects=[],
+            invalidates_effects=[{"run": passed["run"], "ref": "file:///old"}],
+        )
+        state = loop.compute_state(
+            [passed, correction], None, now=self.now + dt.timedelta(minutes=5), health=HEALTH,
+        )
+        self.assertEqual(state["last_outcome"], "no_op")
+        self.assertTrue(state["healthy"])
+        self.assertFalse(state["stalled"])
+
+        failed = self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 0})
+        state_fail = loop.compute_state(
+            [failed, correction], None, now=self.now + dt.timedelta(minutes=5), health=HEALTH,
+        )
+        self.assertFalse(state_fail["healthy"])
+        self.assertTrue(state_fail["stalled"])
+
+
+class CorrectionEffectTests(unittest.TestCase):
+    def test_correction_excludes_named_effect_and_keeps_history(self):
+        run = "2026-10-13T12:31:27+00:00"
+        original = receipt(
+            outcome="acted", run=run,
+            effects=[
+                {"ref": "file:///bogus", "metric_before": 0, "metric_after": 7644},
+                {"ref": "https://github.com/example/pull/1", "metric_before": 10, "metric_after": 2},
+            ],
+        )
+        other = receipt(
+            outcome="acted", run="2026-10-14T01:00:00+00:00",
+            effects=[{"ref": "file:///bogus", "metric_before": 3, "metric_after": 1}],
+        )
+        before = json.dumps([original, other])
+        correction = receipt(
+            outcome="no_op", run="2026-10-14T11:42:14+00:00", effects=[],
+            invalidates_effects=[{"run": run, "ref": "file:///bogus"}],
+        )
+        now = dt.datetime(2026, 10, 14, 12, 0, tzinfo=dt.timezone.utc)
+        state = loop.compute_state([original, other, correction], 7 * 86400, now=now)
+        self.assertEqual(json.dumps([original, other]), before)
+        self.assertEqual(original["effects"][0]["ref"], "file:///bogus")
+        # The named effect is gone; the other ref on that run, and the same
+        # ref on a different run, still count.
+        self.assertEqual(state["effects_7d"], 2)
+        self.assertEqual(state["last_effect_at"], "2026-10-14T01:00:00+00:00")
+        self.assertFalse(state["stalled"])
+
+    def test_receipt_accepts_correction_shape(self):
+        parsed, problem = loop.validate_receipt(json.dumps(receipt(
+            outcome="no_op",
+            invalidates_effects=[{"run": "2026-10-13T12:31:27+00:00", "ref": "file:///bogus"}],
+        )))
+        self.assertIsNone(problem)
+        self.assertEqual(len(parsed["invalidates_effects"]), 1)
+
+    def test_receipt_rejects_bad_correction(self):
+        parsed, problem = loop.validate_receipt(json.dumps(receipt(
+            outcome="no_op", invalidates_effects=[{"run": "2026-10-13T12:31:27+00:00"}],
+        )))
+        self.assertIsNone(parsed)
+        self.assertIn("invalidates_effects.ref", problem)
+
 
 if __name__ == "__main__":
     unittest.main()
