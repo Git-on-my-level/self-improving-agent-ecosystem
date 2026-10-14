@@ -99,6 +99,10 @@
       "type": "string",
       "description": "Advisory back-pointer to the cron/launchd schedule that drives this loop (job id or expression). Not interpreted by the runner."
     },
+    "retired": {
+      "type": "boolean",
+      "description": "True once the loop is stopped and kept for history. Status reports retired loops as retired, not stalled, and tick refuses to run them."
+    },
     "notes": {"type": "string"}
   },
   "allOf": [

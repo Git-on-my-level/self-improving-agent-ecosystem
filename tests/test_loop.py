@@ -1098,5 +1098,75 @@ class CorrectionEffectTests(unittest.TestCase):
         self.assertEqual(len(parsed["invalidates_effects"]), 1)
 
 
+class RetiredLoopTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.ledger = self.dir / "ledger" / "receipts.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _retired(self, **extra):
+        return write_manifest(
+            self.dir,
+            loop="retired-loop",
+            retired=True,
+            retired_at="2026-10-14T01:07:39+07:00",
+            health={
+                "metric": "canary_ok",
+                "op": "gte",
+                "threshold": 1,
+                "max_age_seconds": 3600,
+            },
+            **extra,
+        )
+
+    def test_status_retired_overrides_failing_health_sample(self):
+        self.ledger.parent.mkdir(parents=True)
+        row = receipt(outcome="measured", metrics={"canary_ok": 0})
+        self.ledger.write_text(json.dumps(row) + "\n")
+        proc = run_loop("status", str(self._retired()))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        record = json.loads(proc.stdout.strip())
+        self.assertTrue(record["retired"])
+        self.assertFalse(record["stalled"])
+        self.assertIsNone(record["healthy"])
+        self.assertEqual(record["last_outcome"], "measured")
+        self.assertNotIn("LOOP_STALLED", proc.stdout + proc.stderr)
+
+    def test_status_retired_empty_ledger_is_not_stalled(self):
+        proc = run_loop("status", str(self._retired()))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        record = json.loads(proc.stdout.strip())
+        self.assertTrue(record["retired"])
+        self.assertFalse(record["stalled"])
+        self.assertIsNone(record["healthy"])
+        self.assertIsNone(record["last_run"])
+
+    def test_tick_retired_refuses_without_running_or_escalating(self):
+        marker = self.dir / "ran"
+        proc = run_loop("tick", str(self._retired()), "--", "touch", str(marker))
+        self.assertEqual(proc.returncode, loop.EXIT_MANIFEST)
+        self.assertFalse(marker.exists())
+        self.assertFalse(self.ledger.exists())
+        self.assertIn("refusing to tick retired loop retired-loop", proc.stderr)
+        self.assertIn("2026-10-14T01:07:39+07:00", proc.stderr)
+        self.assertNotIn("LOOP_STALLED", proc.stdout + proc.stderr)
+        self.assertNotIn("PATH=", proc.stderr)
+
+    def test_tick_retired_ignores_manifest_command(self):
+        marker = self.dir / "ran"
+        proc = run_loop("tick", str(self._retired(command=["touch", str(marker)])))
+        self.assertEqual(proc.returncode, loop.EXIT_MANIFEST)
+        self.assertFalse(marker.exists())
+        self.assertNotIn("LOOP_STALLED", proc.stdout + proc.stderr)
+
+    def test_validate_rejects_non_boolean_retired(self):
+        proc = run_loop("validate", str(write_manifest(self.dir, retired="yes")))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("retired: must be a boolean", proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
