@@ -68,7 +68,10 @@
           "enum": ["eq", "ne", "lt", "lte", "gt", "gte"],
           "description": "Comparison of metrics[metric] against threshold. Healthy when the comparison holds."
         },
-        "threshold": {"type": "number"},
+        "threshold": {
+          "type": "number",
+          "description": "Finite number. NaN and infinities are rejected by the runner."
+        },
         "max_age_seconds": {
           "type": "integer",
           "minimum": 1,

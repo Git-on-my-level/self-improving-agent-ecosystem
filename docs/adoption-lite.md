@@ -34,8 +34,9 @@ Every loop proves its effect with three things:
    A later row uses this to drop earlier effects from counting, matched on
    `loop` + `run` + `ref`. The historical row stays as written. Dropped
    effects no longer count toward `effects_7d` or `last_effect_at`. A
-   correction row is not a health sample: the SLO still reads the latest
-   measurement that does not itself carry `invalidates_effects`.
+   successful correction-only row (not `infra_error`, not a measurement) is
+   not a health sample. An `infra_error` or a failing measurement that also
+   carries `invalidates_effects` is still the sample.
 
 2. **A durable ledger.** `~/.hermes/state/loops/<loop-id>/receipts.jsonl` (or
    the owning repo) — never an ephemeral scratch volume.
@@ -50,8 +51,12 @@ Every loop proves its effect with three things:
    `"metrics": {"<metric>": <number>}`. Stalled means the latest sample
    missed the threshold, is `infra_error`, omitted the metric, or is older
    than `max_age_seconds`. A fresh passing sample is not stalled, even with
-   `effects: []`. A failing or missing sample must not read healthy. A later
-   correction row does not become that sample.
+   `effects: []`. A failing or missing sample must not read healthy. The
+   sample is the last row in append order. A timestamp more than 300s in
+   the future is invalid. Metric values and the threshold are finite
+   numbers; an unparseable latest row fails closed instead of revealing
+   an older pass. A successful correction-only row does not become that
+   sample.
 
 The manifest carries the declarations; `scripts/loop` enforces the mechanics.
 

@@ -815,6 +815,97 @@ class HealthSloTests(unittest.TestCase):
         self.assertFalse(state_fail["healthy"])
         self.assertTrue(state_fail["stalled"])
 
+    def test_failed_correction_does_not_hide_an_earlier_pass(self):
+        manifest = write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger),
+        )
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        passed = receipt(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        self.ledger.write_text(loop.RECEIPT_PREFIX + json.dumps(passed) + "\n")
+        correction = receipt_echo_line(
+            outcome="no_op", effects=[],
+            invalidates_effects=[{"run": passed["run"], "ref": "file:///old"}],
+        )
+        script = self.dir / "fail-correction.sh"
+        script.write_text("#!/bin/sh\n" + correction + "\nexit 1\n")
+        script.chmod(0o755)
+        proc = run_loop("tick", str(manifest), "--", str(script))
+        self.assertEqual(proc.returncode, 5, proc.stderr)
+        status = json.loads(run_loop("status", str(manifest)).stdout.strip().splitlines()[0])
+        self.assertEqual(status["last_outcome"], "infra_error")
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["stalled"])
+
+        failing = self.fresh(
+            outcome="measured", effects=[], metrics={"canary_ok": 0},
+            invalidates_effects=[{"run": passed["run"], "ref": "file:///old"}],
+        )
+        direct = loop.compute_state(
+            [passed, failing], None, now=self.now, health=HEALTH,
+        )
+        self.assertFalse(direct["healthy"])
+        self.assertTrue(direct["stalled"])
+
+    def test_invalid_latest_sample_does_not_fall_back_to_an_older_pass(self):
+        manifest = write_manifest(
+            self.dir, progress_budget_seconds=None, health=HEALTH, loop="canary-test",
+            ledger=str(self.ledger),
+        )
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        good = receipt(outcome="measured", effects=[], metrics={"canary_ok": 1})
+        bad = receipt(
+            outcome="measured", effects=[],
+            metrics={"canary_ok": 0, "optional": None},
+        )
+        self.ledger.write_text(
+            loop.RECEIPT_PREFIX + json.dumps(good) + "\n"
+            + loop.RECEIPT_PREFIX + json.dumps(bad) + "\n"
+        )
+        proc = run_loop("status", str(manifest))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        status = json.loads(proc.stdout.strip().splitlines()[0])
+        self.assertEqual(status["corrupt_rows"], 1)
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["stalled"])
+
+    def test_future_timestamp_does_not_mask_a_later_failure(self):
+        tomorrow = (self.now + dt.timedelta(days=1)).isoformat(timespec="seconds")
+        future_pass = receipt(outcome="measured", run=tomorrow, effects=[], metrics={"canary_ok": 1})
+        current_fail = self.fresh(outcome="measured", effects=[], metrics={"canary_ok": 0})
+        masked = loop.compute_state(
+            [future_pass, current_fail], None, now=self.now, health=HEALTH,
+        )
+        self.assertFalse(masked["healthy"])
+        self.assertTrue(masked["stalled"])
+        lone = loop.compute_state([future_pass], None, now=self.now, health=HEALTH)
+        self.assertFalse(lone["healthy"])
+        self.assertTrue(lone["stalled"])
+        skewed = receipt(
+            outcome="measured", effects=[], metrics={"canary_ok": 1},
+            run=(self.now + dt.timedelta(seconds=60)).isoformat(timespec="seconds"),
+        )
+        within = loop.compute_state([skewed], None, now=self.now, health=HEALTH)
+        self.assertTrue(within["healthy"])
+        self.assertFalse(within["stalled"])
+
+    def test_nonfinite_metric_does_not_satisfy_slo(self):
+        payload = json.dumps(receipt(outcome="measured", effects=[], metrics={"canary_ok": float("nan")}))
+        parsed, problem = loop.validate_receipt(payload)
+        self.assertIsNone(parsed)
+        self.assertIn("finite", problem)
+        _, errors = loop.load_manifest(write_manifest(
+            self.dir, health={**HEALTH, "op": "ne", "threshold": float("inf")},
+        ))
+        self.assertTrue(any("health.threshold" in error for error in errors))
+        nan_row = receipt(outcome="measured", effects=[], metrics={"canary_ok": float("nan")})
+        state = loop.compute_state(
+            [nan_row], None, now=self.now,
+            health={**HEALTH, "op": "ne", "threshold": 0},
+        )
+        self.assertFalse(state["healthy"])
+        self.assertTrue(state["stalled"])
+
 
 class CorrectionEffectTests(unittest.TestCase):
     def test_correction_excludes_named_effect_and_keeps_history(self):
