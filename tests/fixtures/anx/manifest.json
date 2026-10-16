@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "loop": "example-watch",
+  "host": "example-host",
+  "archetype": "optimize",
+  "goal_metric": "latency ms",
+  "authority": "propose",
+  "ledger": "receipts.jsonl",
+  "progress_budget_seconds": 7200,
+  "stop_rule": "stop after 14 days without an accepted improvement",
+  "cron": "*/15 * * * *"
+}

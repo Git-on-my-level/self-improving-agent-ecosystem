@@ -77,6 +77,7 @@ The reference architecture has four deliberately separate planes:
 - [Lite adoption: make an existing loop provable](docs/adoption-lite.md)
 - [Failure patterns](docs/failure-patterns.md)
 - [AVO-lite integration](docs/avo-lite.md)
+- [ANX receipts](docs/anx.md) — optional publisher from a loop ledger to Agent Nexus
 
 Agents can use the included
 [`self-improving-ecosystem`](skills/self-improving-ecosystem/SKILL.md) skill.
@@ -145,7 +146,7 @@ docs/       Human architecture and operating guides
 schemas/    JSON Schemas for manifests, policy, and events
 templates/  Copyable ecosystem skeleton
 examples/   Small evaluator and verifier examples
-scripts/    Zero-dependency installer, scaffold, validator, progress check, and AVO event bridge
+scripts/    Zero-dependency installer, scaffold, validator, progress check, AVO event bridge, and ANX receipt publisher
 skills/     Portable agent skill and focused references
 tests/      Contract tests and reward-hacking regression fixtures
 ```

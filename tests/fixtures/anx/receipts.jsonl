@@ -1,0 +1,4 @@
+LOOP_RECEIPT {"loop":"example-watch","run":"2026-04-02T00:00:00Z","outcome":"acted","effects":[{"ref":"https://example.com/pr/1","metric_before":10,"metric_after":12},{"ref":"/tmp/local-only"},{"ref":"card:example"}],"metrics":{"samples":12},"note":"merged the fixture change"}
+{"loop":"example-watch","run":"2026-04-02T01:00:00Z","outcome":"no_op","effects":[],"metrics":{}}
+{"loop":"example-watch","run":"2026-03-01T00:00:00Z","outcome":"measured","effects":[{"ref":"https://example.com/measure/1"}],"metrics":{"samples":9},"note":"earlier measurement"}
+{"loop":"example-watch","run":"2026-04-02T02:00:00+00:00","outcome":"infra_error","effects":[],"error":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"}

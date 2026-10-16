@@ -1,0 +1,6 @@
+{"tick":0,"action":"baseline","objective":10,"note":"baseline score","ts":"2026-04-01T00:00:00Z","metrics":{"samples":1},"correct":true}
+{"tick":1,"action":"accept","objective":12,"delta":2,"commit":"abc123def456","diff_hash":"aaa111","note":"improved the fixture","ts":"2026-04-01T01:00:00Z","metrics":{"samples":2,"latency_ms":1},"correct":true}
+{"tick":2,"action":"reject","objective":9,"delta":-1,"commit":"fff999aaa000","diff_hash":"bbb222","note":"worse than baseline","ts":"2026-04-01T02:00:00Z","correct":false}
+{"tick":3,"action":"error","note":"scorer timeout","ts":"2026-04-01T03:00:00Z","diff_hash":"ccc333"}
+{"tick":4,"action":"accept","objective":8,"delta":1,"commit":"oldcommit0001","note":"too old","ts":"2026-03-01T00:00:00Z","correct":true}
+{"tick":5,"action":"accept","objective":7,"delta":1,"commit":"undated0001","note":"no clock on this row","correct":true}
