@@ -72,18 +72,31 @@ def load_publisher():
 anx = load_publisher()
 
 
+def flag_values(argv, name):
+    """Read ``--name=value`` and the older separate-token form."""
+    prefix = name + "="
+    found = []
+    index = 0
+    while index < len(argv):
+        item = argv[index]
+        if item.startswith(prefix):
+            found.append(item[len(prefix):])
+        elif item == name and index + 1 < len(argv):
+            found.append(argv[index + 1])
+            index += 1
+        index += 1
+    return found
+
+
 def flag(argv, name):
-    if name not in argv:
+    values = flag_values(argv, name)
+    if not values:
         return None
-    return argv[argv.index(name) + 1]
+    return values[0]
 
 
 def flags(argv, name):
-    found = []
-    for index, item in enumerate(argv):
-        if item == name:
-            found.append(argv[index + 1])
-    return found
+    return flag_values(argv, name)
 
 
 def by_run(commands):
@@ -141,8 +154,8 @@ class MappingTests(unittest.TestCase):
             if decision:
                 self.assertEqual(flag(command, "--candidate"), f"cand-{kind}")
             else:
-                self.assertNotIn("--candidate", command)
-                self.assertNotIn("--score-after", command)
+                self.assertIsNone(flag(command, "--candidate"))
+                self.assertIsNone(flag(command, "--score-after"))
 
     def test_intermediate_events_publish_only_the_sole_objective(self):
         for kind in INTERMEDIATE:
@@ -226,7 +239,7 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(flag(found["evt-accepted"], "--outcome"), "acted")
         self.assertEqual(flag(found["evt-accepted"], "--decision"), "kept")
         self.assertEqual(flag(found["evt-accepted"], "--score-after"), "12")
-        self.assertNotIn("--score-before", found["evt-accepted"])
+        self.assertIsNone(flag(found["evt-accepted"], "--score-before"))
         self.assertEqual(flag(found["evt-rejected"], "--decision"), "rejected")
         self.assertEqual(flag(found["evt-rollback"], "--decision"), "reverted")
         self.assertEqual(flag(found["evt-noop"], "--outcome"), "no_op")
@@ -248,13 +261,17 @@ class AvoAndReceiptTests(unittest.TestCase):
             card="card:x", goal_metric="latency_ms", since=None, loop="improve", anx="anx", workspace=None,
         )
         found = by_run(commands)
-        baseline = found["avo:improve:0:none:baseline"]
+        baseline_row = json.loads((FIXTURES / "avo.jsonl").read_text().splitlines()[0])
+        baseline_id = f"avo:improve:0:{anx.avo_source_identity(baseline_row)}:baseline"
+        self.assertNotIn(":none:", baseline_id)
+        self.assertEqual(len(anx.avo_source_identity(baseline_row)), 64)
+        baseline = found[baseline_id]
         self.assertEqual(flag(baseline, "--outcome"), "measured")
         self.assertIsNone(flag(baseline, "--decision"))
         self.assertEqual(flag(baseline, "--metric"), "latency_ms=10")
         self.assertEqual(flag(baseline, "--summary"), "baseline score")
 
-        accepted = found["avo:improve:1:abc123def456:accept"]
+        accepted = found["avo:improve:1:aaa111:accept"]
         self.assertEqual(flag(accepted, "--outcome"), "acted")
         self.assertEqual(flag(accepted, "--decision"), "kept")
         self.assertEqual(flag(accepted, "--candidate"), "abc123def456")
@@ -262,11 +279,11 @@ class AvoAndReceiptTests(unittest.TestCase):
         self.assertEqual(flag(accepted, "--score-after"), "12")
         self.assertEqual(flags(accepted, "--metric"), ["latency_ms=12", "samples=2"])
 
-        rejected = found["avo:improve:2:fff999aaa000:reject"]
+        rejected = found["avo:improve:2:bbb222:reject"]
         self.assertEqual(flag(rejected, "--outcome"), "measured")
         self.assertEqual(flag(rejected, "--decision"), "rejected")
-        self.assertNotIn("--score-before", rejected)
-        self.assertNotIn("--score-after", rejected)
+        self.assertIsNone(flag(rejected, "--score-before"))
+        self.assertIsNone(flag(rejected, "--score-after"))
         self.assertEqual(flag(rejected, "--metric"), "latency_ms=9")
 
         failed = found["avo:improve:3:ccc333:error"]
@@ -321,7 +338,7 @@ class AvoAndReceiptTests(unittest.TestCase):
         self.assertEqual(flags(acted, "--ref"), ["https://example.com/pr/1", "card:example"])
         self.assertNotIn("/tmp/local-only", json.dumps(acted))
         self.assertEqual(flags(acted, "--metric"), ["latency ms=12", "samples=12"])
-        self.assertNotIn("--decision", acted)
+        self.assertIsNone(flag(acted, "--decision"))
 
         quiet = found["example-watch:2026-04-02T01:00:00Z"]
         self.assertEqual(flag(quiet, "--outcome"), "no_op")
@@ -365,10 +382,10 @@ class AvoAndReceiptTests(unittest.TestCase):
             card="card:x", goal_metric="latency_ms", since=since, loop="improve", anx="anx", workspace=None,
         )
         runs = set(by_run(commands))
-        self.assertIn("avo:improve:2:fff999aaa000:reject", runs)
+        self.assertIn("avo:improve:2:bbb222:reject", runs)
         self.assertIn("avo:improve:5:undated0001:accept", runs)
-        self.assertNotIn("avo:improve:1:abc123def456:accept", runs)
-        self.assertNotIn("avo:improve:0:none:baseline", runs)
+        self.assertNotIn("avo:improve:1:aaa111:accept", runs)
+        self.assertFalse(any(":none:" in run for run in runs))
         self.assertNotIn("evt-old", runs)
         self.assertIn("evt-accepted", runs)
         offset = anx.parse_since("2026-06-01T01:00:00+01:00")
@@ -407,25 +424,26 @@ class AvoAndReceiptTests(unittest.TestCase):
         self.assertNotIn("avo:improve:5:c0ffee01:verify", found)
         self.assertNotIn("avo:improve:5:c0ffee01:budget", found)
 
-        accepted = found["avo:improve:5:abc123def456:accept"]
+        accepted = found["avo:improve:5:c0ffee01:accept"]
         self.assertEqual(flag(accepted, "--outcome"), "acted")
         self.assertEqual(flag(accepted, "--decision"), "kept")
+        self.assertEqual(flag(accepted, "--candidate"), "abc123def456")
         self.assertEqual(flag(accepted, "--score-before"), "10")
         self.assertEqual(flag(accepted, "--score-after"), "12")
 
         lone = found["avo:improve:6:onlyhash01:candidate"]
         self.assertEqual(flag(lone, "--outcome"), "measured")
         self.assertIsNone(flag(lone, "--decision"))
-        self.assertNotIn("--candidate", lone)
+        self.assertIsNone(flag(lone, "--candidate"))
         self.assertEqual(flag(lone, "--metric"), "latency_ms=4")
         self.assertEqual(flag(lone, "--summary"), "only score for this attempt")
 
         reset = found["avo:improve:7:bbbbccccdddd:rebaseline"]
         self.assertEqual(flag(reset, "--outcome"), "measured")
         self.assertIsNone(flag(reset, "--decision"))
-        self.assertNotIn("--candidate", reset)
-        self.assertNotIn("--score-before", reset)
-        self.assertNotIn("--score-after", reset)
+        self.assertIsNone(flag(reset, "--candidate"))
+        self.assertIsNone(flag(reset, "--score-before"))
+        self.assertIsNone(flag(reset, "--score-after"))
         self.assertEqual(flags(reset, "--metric"), ["latency_ms=11", "samples=4"])
         self.assertEqual(
             flag(reset, "--summary"),
@@ -495,7 +513,8 @@ class AvoAndReceiptTests(unittest.TestCase):
         self.assertIsNone(flag(lone, "--decision"))
         self.assertEqual(flag(lone, "--metric"), "f1=4")
 
-        kept = found["avo:improve:3:ccc111ddd222:accept"]
+        kept = found["avo:improve:3:flatdiff01:accept"]
+        self.assertEqual(flag(kept, "--candidate"), "ccc111ddd222")
         self.assertEqual(flag(kept, "--outcome"), "acted")
         self.assertEqual(flag(kept, "--decision"), "kept")
         self.assertEqual(flag(kept, "--score-before"), "2")
@@ -571,6 +590,159 @@ class AvoAndReceiptTests(unittest.TestCase):
         self.assertEqual(names[1:], [f"m{i:02d}" for i in range(15)])
         self.assertNotIn("ready", names)
         self.assertNotIn("label", names)
+
+    def test_distinct_baselines_and_patches_do_not_share_run_ids(self):
+        alpha = {"tick": 0, "action": "baseline", "objective": 1, "note": "alpha"}
+        beta = {"tick": 0, "action": "baseline", "objective": 2, "note": "beta"}
+        patch_a = {
+            "tick": 1, "action": "accept", "loop": "improve", "base": "abc123def456",
+            "diff_hash": "patchaaaa", "objective": 3, "delta": 1, "correct": True, "note": "patch a",
+        }
+        patch_b = dict(patch_a, diff_hash="patchbbbb", objective=4, note="patch b")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            left = root / "left.jsonl"
+            right = root / "right.jsonl"
+            again = root / "again.jsonl"
+            write_jsonl(left, [alpha])
+            write_jsonl(right, [beta])
+            write_jsonl(again, [alpha])
+            first = anx.build_receipt_commands(
+                [left], card="card:x", goal_metric="score", since=None, loop=None, anx="anx", workspace=None,
+            )
+            second = anx.build_receipt_commands(
+                [right], card="card:x", goal_metric="score", since=None, loop=None, anx="anx", workspace=None,
+            )
+            rerun = anx.build_receipt_commands(
+                [again], card="card:x", goal_metric="score", since=None, loop=None, anx="anx", workspace=None,
+            )
+            patches = root / "patches.jsonl"
+            write_jsonl(patches, [patch_a, patch_b])
+            both = anx.build_receipt_commands(
+                [patches], card="card:x", goal_metric="score", since=None, loop=None, anx="anx", workspace=None,
+            )
+        alpha_id = flag(first[0], "--run-id")
+        beta_id = flag(second[0], "--run-id")
+        self.assertNotEqual(alpha_id, beta_id)
+        self.assertNotIn(":none:", alpha_id)
+        self.assertNotIn(":none:", beta_id)
+        self.assertEqual(alpha_id, f"avo:avo:0:{anx.avo_source_identity(alpha)}:baseline")
+        self.assertEqual(alpha_id, flag(rerun[0], "--run-id"))
+        found = by_run(both)
+        self.assertIn("avo:improve:1:patchaaaa:accept", found)
+        self.assertIn("avo:improve:1:patchbbbb:accept", found)
+        self.assertEqual(flag(found["avo:improve:1:patchaaaa:accept"], "--candidate"), "abc123def456")
+        self.assertEqual(flag(found["avo:improve:1:patchbbbb:accept"], "--candidate"), "abc123def456")
+
+    def test_lifecycle_grouping_stays_inside_one_loop(self):
+        candidate = {
+            "ts": "2026-06-01T00:00:00Z", "tick": 1, "event": "candidate", "loop": "one",
+            "score": {"correct": True, "objective": 1.25, "metrics": {"f1": 1.25}},
+            "note": "loop one score",
+        }
+        rejected = {
+            "ts": "2026-06-01T00:00:00Z", "tick": 1, "event": "reject", "loop": "two",
+            "reason": "other loop",
+            "score": {"correct": True, "objective": 2.0},
+            "note": "should not hide loop one",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            one = root / "one.jsonl"
+            two = root / "two.jsonl"
+            write_jsonl(one, [candidate])
+            write_jsonl(two, [rejected])
+            commands = anx.build_receipt_commands(
+                [one, two], card="card:x", goal_metric="f1", since=None, loop=None,
+                anx="anx", workspace=None,
+            )
+        found = by_run(commands)
+        cand_id = f"avo:one:1:{anx.avo_source_identity(candidate)}:candidate"
+        rej_id = f"avo:two:1:{anx.avo_source_identity(rejected)}:reject"
+        self.assertEqual(flag(found[cand_id], "--outcome"), "measured")
+        self.assertIsNone(flag(found[cand_id], "--decision"))
+        self.assertEqual(flag(found[cand_id], "--summary"), "loop one score")
+        self.assertEqual(flag(found[rej_id], "--outcome"), "measured")
+        self.assertEqual(flag(found[rej_id], "--decision"), "rejected")
+        self.assertEqual(flag(found[rej_id], "--summary"), "other loop")
+
+    def test_drive_relative_refs_are_not_forwarded(self):
+        row = {
+            "loop": "example-watch",
+            "run": "2026-04-02T00:00:00Z",
+            "outcome": "acted",
+            "note": "refs",
+            "effects": [
+                {"ref": "c:private/report.json"},
+                {"ref": "https://example.com/pr/1"},
+                {"ref": "card:example"},
+                {"ref": "file:///tmp/fixture"},
+                {"ref": "/tmp/fixture"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "refs.jsonl"
+            write_jsonl(path, [row])
+            command = anx.build_receipt_commands(
+                [path], card="card:x", goal_metric=None, since=None, loop=None, anx="anx", workspace=None,
+            )[0]
+        rendered = json.dumps(command)
+        self.assertNotIn("c:private/report.json", rendered)
+        self.assertNotIn("file://", rendered)
+        self.assertNotIn("/tmp/fixture", rendered)
+        self.assertEqual(flags(command, "--ref"), ["https://example.com/pr/1", "card:example"])
+
+    def test_since_silences_old_unrecognized_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "mixed.jsonl"
+            write_jsonl(path, [
+                {"hello": "world", "ts": "2020-01-01T00:00:00Z"},
+                {"hello": "world", "ts": "2026-02-01T00:00:00Z"},
+                {
+                    "tick": 1, "action": "baseline", "objective": 1, "note": "kept",
+                    "commit": "abc123def456", "ts": "2026-02-01T00:00:00Z",
+                },
+            ])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                commands = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="score",
+                    since=anx.parse_since("2026-01-01T00:00:00Z"),
+                    loop="improve", anx="anx", workspace=None,
+                )
+            warning = stderr.getvalue()
+            self.assertIn("mixed.jsonl:2", warning)
+            self.assertIn("skipping unrecognized row", warning)
+            self.assertNotIn("mixed.jsonl:1", warning)
+            self.assertEqual(list(by_run(commands)), ["avo:improve:1:abc123def456:baseline"])
+            with self.assertRaises(anx.PublishError) as caught:
+                anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="score",
+                    since=anx.parse_since("2026-01-01T00:00:00Z"),
+                    loop="improve", anx="anx", workspace=None, strict=True,
+                )
+        self.assertIn("mixed.jsonl:1", str(caught.exception))
+        self.assertIn("unrecognized row", str(caught.exception))
+
+    def test_rejected_accept_keeps_marker_when_note_is_truncated(self):
+        note = "N" * 280
+        row = {
+            "tick": 1, "action": "accept", "correct": False, "objective": 2, "delta": 1,
+            "commit": "abc123def456", "note": note,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "long.jsonl"
+            write_jsonl(path, [row])
+            command = anx.build_receipt_commands(
+                [path], card="card:x", goal_metric="score", since=None, loop="improve",
+                anx="anx", workspace=None,
+            )[0]
+        summary = flag(command, "--summary")
+        self.assertEqual(flag(command, "--outcome"), "measured")
+        self.assertEqual(flag(command, "--decision"), "rejected")
+        self.assertEqual(len(summary), 280)
+        self.assertTrue(summary.startswith("N"))
+        self.assertTrue(summary.endswith("not kept: correct is false"))
 
     def test_unknown_action_and_event_skip_unless_strict(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -676,7 +848,9 @@ class ManifestTests(unittest.TestCase):
             target=None, baseline=None, unit=None, anx="anx", workspace="example",
         )
         self.assertEqual(len(cadence), 1)
-        self.assertEqual(cadence[0][:4], ["anx", "--workspace", "example", "work"])
+        self.assertEqual(cadence[0][0], "anx")
+        self.assertEqual(cadence[0][1], "--workspace=example")
+        self.assertEqual(cadence[0][2:5], ["work", "cadence", "card:x"])
         self.assertEqual(flag(cadence[0], "--every"), "15m")
         self.assertEqual(flag(cadence[0], "--budget"), "2h")
         self.assertEqual(flag(cadence[0], "--stop-rule"), "stop after 14 days without an accepted improvement")
@@ -733,7 +907,7 @@ class ManifestTests(unittest.TestCase):
                 target=None, baseline=None, unit=None, anx="anx", workspace=None,
             )[0]
         self.assertEqual(flag(command, "--every"), "1d")
-        self.assertNotIn("--budget", command)
+        self.assertIsNone(flag(command, "--budget"))
 
     def test_example_manifest_does_not_leak_host_or_ledger(self):
         command = anx.build_manifest_commands(
@@ -776,7 +950,9 @@ class CliTests(unittest.TestCase):
             self.assertGreaterEqual(len(commands), 4)
             for command in commands:
                 self.assertIsInstance(command, list)
-                self.assertEqual(command[:4], [str(missing), "--workspace", "example", "work"])
+                self.assertEqual(command[0], str(missing))
+                self.assertEqual(command[1], "--workspace=example")
+                self.assertEqual(command[2:5], ["work", "receipt", "card:x"])
                 self.assertNotIn("shell", command)
             touched = self.run_cli(
                 "receipts", "--card", "card:x", "--input", str(FIXTURES / "receipts.jsonl"),
@@ -809,13 +985,34 @@ class CliTests(unittest.TestCase):
             root = pathlib.Path(tmp)
             log = root / "argv.jsonl"
             binary = root / "anx"
+            # A token of its own named --timeout or --base-url is ANX global config.
+            # --summary=--timeout=... must not be parsed that way.
             binary.write_text(textwrap.dedent(f"""\
                 #!/usr/bin/env python3
-                import json, pathlib, sys
+                import json, pathlib, re, sys
+                args = sys.argv[1:]
+                index = 0
+                while index < len(args):
+                    token = args[index]
+                    name, eq, value = token.partition("=")
+                    if name in ("--timeout", "--base-url"):
+                        if not eq:
+                            if index + 1 >= len(args):
+                                sys.stderr.write("missing global value\\n")
+                                sys.exit(2)
+                            value = args[index + 1]
+                            index += 1
+                        if name == "--timeout" and not re.fullmatch(r"[1-9][0-9]*[smhd]", value):
+                            sys.stderr.write("invalid --timeout\\n")
+                            sys.exit(2)
+                        if name == "--base-url":
+                            sys.stderr.write("unexpected --base-url\\n")
+                            sys.exit(2)
+                    index += 1
                 pathlib.Path({str(log)!r}).open("a").write(json.dumps(sys.argv) + "\\n")
                 """))
             binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
-            note = 'say "hello"; touch should-not-run'
+            note = "--timeout=not-a-duration"
             ledger = root / "ledger.jsonl"
             ledger.write_text(json.dumps({
                 "tick": 1, "action": "accept", "objective": 2, "delta": 1,
@@ -831,8 +1028,34 @@ class CliTests(unittest.TestCase):
             recorded = json.loads(log.read_text().strip())
             self.assertEqual(recorded[0], str(binary))
             self.assertEqual(recorded[1:4], ["work", "receipt", "card:x"])
-            self.assertIn(note, recorded)
+            self.assertNotIn(note, recorded)
+            self.assertEqual(flag(recorded, "--summary"), note)
             self.assertFalse((root / "should-not-run").exists())
+
+            manifest = root / "loop.json"
+            manifest.write_text(json.dumps({
+                "schema_version": 1,
+                "stop_rule": "--base-url=http://127.0.0.1:9",
+                "progress_budget_seconds": 60,
+                "cron": "*/15 * * * *",
+            }))
+            log.unlink()
+            cadence = self.run_cli(
+                "manifest", "--card", "card:x", "--manifest", str(manifest),
+                "--anx", str(binary), "--apply",
+            )
+            self.assertEqual(cadence.returncode, 0, cadence.stderr)
+            recorded = json.loads(log.read_text().strip())
+            self.assertNotIn("--base-url=http://127.0.0.1:9", recorded)
+            self.assertEqual(flag(recorded, "--stop-rule"), "--base-url=http://127.0.0.1:9")
+
+            blocked = self.run_cli(
+                "receipts", "--card=--timeout=not-a-duration", "--input", str(ledger),
+                "--anx", str(binary), "--apply",
+            )
+            self.assertEqual(blocked.returncode, 2)
+            self.assertIn("does not start with '-'", blocked.stderr)
+            self.assertEqual(log.read_text().count("\n"), 1)
 
     def test_apply_stops_on_the_first_nonzero_status(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -909,8 +1132,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(first.stdout, second.stdout)
         self.assertIn("no timestamp", first.stderr)
         runs = {flag(json.loads(line), "--run-id") for line in first.stdout.splitlines()}
-        self.assertIn("avo:improve:2:fff999aaa000:reject", runs)
-        self.assertNotIn("avo:improve:1:abc123def456:accept", runs)
+        self.assertIn("avo:improve:2:bbb222:reject", runs)
+        self.assertNotIn("avo:improve:1:aaa111:accept", runs)
         self.assertNotIn("example-watch:2026-03-01T00:00:00Z", runs)
         self.assertIn("example-watch:2026-04-02T00:00:00Z", runs)
 

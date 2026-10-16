@@ -19,7 +19,10 @@ python3 scripts/anx-publish.py receipts \
   --since 2026-01-01T00:00:00Z
 ```
 
-That prints one JSON array per run. A cron job that should actually publish
+That prints one JSON array per run. Every value-taking flag is one token,
+`--flag=value`, so a summary or stop rule that looks like `--timeout=...` or
+`--base-url=...` stays a value. The card ref is positional. A ref that starts
+with `-` is rejected. A cron job that should actually publish
 uses the same command with `--apply`:
 
 ```bash
@@ -53,18 +56,24 @@ row, not from the clock:
 | Input | Run id |
 | --- | --- |
 | Ecosystem event | `event_id` |
-| AVO ledger row | `avo:<loop>:<tick>:<commit or diff_hash or none>:<action>` |
+| AVO ledger row | `avo:<loop>:<tick>:<diff_hash, else base or commit, else sha256>:<action>` |
 | Loop receipt | `<loop>:<run>` |
 
 Re-publishing the same ledger does not create a second receipt. `--since` only
-limits what this process sends; it is not part of the id. Editing a note
-without changing the id does not change the stored receipt. Summaries are the
-reason, note, or error text, collapsed to one line and truncated to 280
-characters. Keep secrets out of those fields: the publisher copies them and
-does not redact them.
+limits what this process sends; it is not part of the id. The AVO id uses a
+real `diff_hash` when the row has one, otherwise `base` or `commit`. A row
+with none of those is identified by the sha256 of its canonical JSON, never
+by `none`. The same row therefore keeps the same id across files and reruns.
+Two different tick-zero baselines, or two patches that share a base, do not.
+Editing a note does not change the id when a patch hash, base, or commit is
+present. Summaries are the reason, note, or error text, collapsed to one line
+and truncated to 280 characters. An accept that is not kept keeps the marker
+`not kept: correct is false` inside that limit. Keep secrets out of those
+fields: the publisher copies them and does not redact them.
 
-Local evidence paths and `file:` URIs are not forwarded. `http` and `https`
-URLs and typed refs such as `card:example` are.
+Local evidence paths and `file:` URIs are not forwarded. A Windows
+drive-relative path such as `c:private/report.json` is a local path, not a
+typed ref. `http` and `https` URLs and typed refs such as `card:example` are.
 
 ## Event stream
 
@@ -144,7 +153,7 @@ summary is `reason`, then `note`.
 | --- | --- | --- | --- |
 | `baseline` | measured | — | goal metric = objective |
 | `rebaseline` | measured | — | goal metric = objective; summary is the note. Resets the incumbent and carries no experiment decision |
-| `accept` | acted | kept | score-before = objective − delta, score-after = objective, goal metric = objective. `correct: false` (flat or under `score`) is measured / rejected, and the summary says it was not kept |
+| `accept` | acted | kept | score-before = objective − delta, score-after = objective, goal metric = objective. `correct: false` (flat or under `score`) is measured / rejected, and the summary keeps `not kept: correct is false` inside the 280-character limit |
 | `reject` | measured | rejected | goal metric = objective |
 | `error` | measured | rejected | same outcome as `candidate_failed`; goal metric when objective is present |
 | `candidate` | skipped | lifecycle | published as measured only when it alone carries the attempt's objective |
@@ -167,12 +176,14 @@ dropped, and metrics past the cap are dropped.
 same kind of marker as `candidate_started` and `candidate_built`. A row is
 published as `measured`, with no experiment decision, only when it has a
 numeric `objective` and no `baseline`, `rebaseline`, `accept`, `reject`, or
-`error` row for that same attempt also has a numeric objective. A real
-`diff_hash` is the attempt. Rows that use `event` share their `tick`, so a
-lifecycle line is tied to the baseline or reject on that tick. Flat rows
-without a patch hash group by `base` or `commit`. Placeholder hashes
-`baseline` and `rebaseline` are not attempt ids. A lifecycle row with no
-attempt key stays skipped. A file whose first line is one of these rows is
+`error` row for that same attempt also has a numeric objective. Grouping is
+per loop: a lifecycle row in loop `one` is not hidden by a terminal row in
+loop `two`, including when the rows come from different input files. A real
+`diff_hash` is the attempt. Rows that use `event` share their `tick` inside
+that loop, so a lifecycle line is tied to the baseline or reject on that
+tick. Flat rows without a patch hash group by `base` or `commit`. Placeholder
+hashes `baseline` and `rebaseline` are not attempt ids. A lifecycle row with
+no attempt key stays skipped. A file whose first line is one of these rows is
 still published.
 
 Any other action (`reflect`, `preview`, `stalled`, `supervisor_error`, and
@@ -181,11 +192,14 @@ the action, and the rest of the file is still published. A malformed JSON
 line, and a JSON object that is not an event, an AVO row, or a loop receipt,
 are skipped the same way. `--strict` restores fail-fast for all of these.
 `--since` still bounds which warnings are printed: a mapped or unmapped row
-older than the watermark is silent. A line that is not JSON has no timestamp,
-so it always warns.
+older than the watermark is silent, including an unrecognized object whose
+`ts`, `occurred_at`, or `run` is older than `--since`. A line that is not JSON
+has no timestamp, so it always warns.
 
-The experiment candidate is `base` or `commit`, otherwise the diff hash.
-`--started-at` is `ts`. Ledger fields such as `run_dir` are not forwarded.
+The experiment candidate is `base` or `commit`, otherwise the diff hash. The
+run id prefers the diff hash when both are present, so two patches that share
+a base stay distinct receipts. `--started-at` is `ts`. Ledger fields such as
+`run_dir` are not forwarded.
 
 ## Loop receipts
 

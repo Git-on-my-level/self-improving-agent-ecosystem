@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import math
 import pathlib
@@ -195,6 +196,20 @@ def summarize(*candidates: Any, fallback: str) -> str:
     return text
 
 
+def keep_marker(text: str, marker: str) -> str:
+    """Keep ``marker`` inside the summary limit, reserving room before truncation."""
+    if marker in text:
+        return text[:SUMMARY_LIMIT]
+    suffix = f"; {marker}"
+    room = SUMMARY_LIMIT - len(suffix)
+    if room <= 0:
+        return marker[:SUMMARY_LIMIT]
+    body = text[:room].rstrip()
+    if not body:
+        return marker[:SUMMARY_LIMIT]
+    return f"{body}{suffix}"
+
+
 def safe_ref(value: Any) -> str | None:
     """Keep https URLs and typed refs. Drop local paths and file URIs."""
     if not isinstance(value, str):
@@ -205,11 +220,33 @@ def safe_ref(value: Any) -> str | None:
     lower = text.lower()
     if lower.startswith(("https://", "http://")):
         return text
-    if lower.startswith(("file:", "/", "~", "./", "../")) or "\\" in text or "//" in text:
+    # A one-letter scheme is a Windows drive (`c:private/report.json`), not a typed ref.
+    if re.match(r"^[A-Za-z]:", text) or "\\" in text or "//" in text:
+        return None
+    if lower.startswith(("file:", "/", "~", "./", "../")):
         return None
     if _TYPED_REF_RE.fullmatch(text):
         return text
     return None
+
+
+def bound_flag(name: str, value: str) -> str:
+    """One argv token, so a value that looks like ``--timeout=...`` stays a value."""
+    if any(char in value for char in "\n\r"):
+        raise PublishError(f"{name} must be a single line")
+    return f"{name}={value}"
+
+
+def positional_ref(value: str, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value != value.strip()
+        or any(char in value for char in "\n\r\t")
+        or value.startswith("-")
+    ):
+        raise PublishError(f"{label} must be a single-line ref that does not start with '-'")
+    return value
 
 
 def dedupe(items: list[str]) -> list[str]:
@@ -336,7 +373,9 @@ def derive_every(cron: Any) -> str | None:
 def with_anx(anx: str, workspace: str | None, tail: list[str]) -> list[str]:
     argv = [anx]
     if workspace:
-        argv.extend(["--workspace", workspace])
+        if workspace.startswith("-"):
+            raise PublishError("--workspace must not start with '-'")
+        argv.append(bound_flag("--workspace", workspace))
     argv.extend(tail)
     return argv
 
@@ -360,28 +399,32 @@ def receipt_tail(
         raise PublishError(f"unknown outcome: {outcome}")
     if not run_id or any(char in run_id for char in "\n\r"):
         raise PublishError("run-id must be a single line")
+    card = positional_ref(card, "card ref")
     argv = [
         "work", "receipt", card,
-        "--run-id", run_id,
-        "--outcome", outcome,
-        "--summary", summary,
+        bound_flag("--run-id", run_id),
+        bound_flag("--outcome", outcome),
+        bound_flag("--summary", summary),
     ]
     for name, value in bounded_metrics(metrics, goal_metric):
-        argv.extend(["--metric", f"{name}={format_number(value)}"])
+        argv.append(bound_flag("--metric", f"{name}={format_number(value)}"))
     if decision is not None:
         if decision not in DECISIONS:
             raise PublishError(f"unknown decision: {decision}")
         if not candidate or any(char in candidate for char in "\n\r"):
             raise PublishError("experiment decision requires a single-line candidate")
-        argv.extend(["--candidate", candidate, "--decision", decision])
+        argv.append(bound_flag("--candidate", candidate))
+        argv.append(bound_flag("--decision", decision))
         if score_before is not None:
-            argv.extend(["--score-before", format_number(score_before)])
+            argv.append(bound_flag("--score-before", format_number(score_before)))
         if score_after is not None:
-            argv.extend(["--score-after", format_number(score_after)])
+            argv.append(bound_flag("--score-after", format_number(score_after)))
     for ref in refs or []:
-        argv.extend(["--ref", ref])
+        if ref.startswith("-"):
+            raise PublishError("ref must not start with '-'")
+        argv.append(bound_flag("--ref", ref))
     if started_at:
-        argv.extend(["--started-at", started_at])
+        argv.append(bound_flag("--started-at", started_at))
     return argv
 
 
@@ -552,32 +595,71 @@ def avo_attempt_ref(row: dict[str, Any]) -> str | None:
     return None
 
 
-def avo_identity(row: dict[str, Any]) -> str:
+def avo_patch_hash(row: dict[str, Any]) -> str | None:
+    diff = row.get("diff_hash")
+    if isinstance(diff, str) and diff.strip() not in _AVO_PLACEHOLDER_DIFFS:
+        return diff.strip()
+    return None
+
+
+def canonical_row_text(row: dict[str, Any]) -> str:
+    return json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def avo_source_identity(row: dict[str, Any]) -> str:
+    """Stable attempt id. Never the placeholder ``none``.
+
+    A real ``diff_hash`` wins, then ``base`` or ``commit``. Otherwise the id is
+    the sha256 of the canonical row, so two different baselines do not share
+    a run id and a rerun of the same row does.
+    """
+    diff = avo_patch_hash(row)
+    if diff:
+        return diff
     ref = avo_attempt_ref(row)
     if ref:
         return ref
-    diff_hash = row.get("diff_hash")
-    if isinstance(diff_hash, str) and diff_hash.strip() and diff_hash.strip() != "none":
-        return diff_hash.strip()
-    return "none"
+    return hashlib.sha256(canonical_row_text(row).encode("utf-8")).hexdigest()
 
 
-def avo_candidate_key(row: dict[str, Any]) -> str | None:
-    """Group AVO rows that belong to one attempt.
+def avo_experiment_candidate(row: dict[str, Any]) -> str:
+    """Experiment label: ``base`` or ``commit``, otherwise the patch, otherwise the source id."""
+    ref = avo_attempt_ref(row)
+    if ref:
+        return ref
+    diff = avo_patch_hash(row)
+    if diff:
+        return diff
+    return avo_source_identity(row)
+
+
+def avo_loop_name(row: dict[str, Any], fallback: str | None) -> str:
+    loop_id = row.get("loop")
+    if isinstance(loop_id, str) and loop_id.strip():
+        return loop_id.strip()
+    if isinstance(fallback, str) and fallback.strip():
+        return fallback.strip()
+    return "avo"
+
+
+def avo_candidate_key(row: dict[str, Any], *, loop: str | None) -> str | None:
+    """Group AVO rows that belong to one attempt in one loop.
 
     A real ``diff_hash`` is the attempt. Otherwise rows that use ``event``
     share their ``tick``. Flat rows without a patch hash group by ``base`` or
     ``commit``. Placeholder hashes (``baseline``, ``rebaseline``) are not
-    attempts.
+    attempts. The loop id is part of the key, so a terminal row in another
+    loop does not hide a lifecycle row.
     """
-    diff = row.get("diff_hash")
-    if isinstance(diff, str) and diff.strip() not in _AVO_PLACEHOLDER_DIFFS:
-        return f"{avo_tick_token(row)}:{diff.strip()}"
+    scope = avo_loop_name(row, loop)
+    diff = avo_patch_hash(row)
+    if diff:
+        return f"{scope}:{avo_tick_token(row)}:{diff}"
     if isinstance(row.get("event"), str) and not isinstance(row.get("action"), str) and "tick" in row:
-        return f"tick:{avo_tick_token(row)}"
+        return f"{scope}:tick:{avo_tick_token(row)}"
     ref = avo_attempt_ref(row)
     if ref:
-        return f"commit:{ref}"
+        return f"{scope}:commit:{ref}"
     return None
 
 
@@ -590,12 +672,12 @@ def avo_tick_token(row: dict[str, Any]) -> str:
     return str(int(tick))
 
 
-def sole_avo_objective_carriers(rows: list[dict[str, Any]]) -> set[str]:
+def sole_avo_objective_carriers(rows: list[dict[str, Any]], *, loop: str | None) -> set[str]:
     """Attempt keys whose only numeric objective sits on a lifecycle row."""
     non_intermediate: set[str] = set()
     intermediate: set[str] = set()
     for row in rows:
-        key = avo_candidate_key(row)
+        key = avo_candidate_key(row, loop=loop)
         if key is None or avo_objective(row) is None:
             continue
         action = avo_action_name(row)
@@ -629,7 +711,7 @@ def avo_command(
     action = avo_action_name(row)
     correct = avo_correct(row)
     if action in INTERMEDIATE_AVO_ACTIONS:
-        key = avo_candidate_key(row)
+        key = avo_candidate_key(row, loop=loop)
         if key is None or key not in sole_carriers or avo_objective(row) is None:
             return None
         outcome, decision = "measured", None
@@ -639,15 +721,9 @@ def avo_command(
         outcome, decision = AVO_ACTIONS[action]
         if action == "accept" and correct is False:
             outcome, decision = "measured", "rejected"
-    loop_id = row.get("loop")
-    if isinstance(loop_id, str) and loop_id.strip():
-        loop_name = loop_id.strip()
-    elif loop:
-        loop_name = loop
-    else:
-        loop_name = "avo"
+    loop_name = avo_loop_name(row, loop)
     tick = avo_tick(row, where)
-    identity = avo_identity(row)
+    identity = avo_source_identity(row)
     if any(char in identity for char in "\n\r") or any(char in loop_name for char in "\n\r"):
         raise PublishError(f"{where}: loop id and commit must be single-line")
     run_id = f"avo:{loop_name}:{tick}:{identity}:{action}"
@@ -660,7 +736,7 @@ def avo_command(
     score_after = None
     candidate = None
     if decision is not None:
-        candidate = identity if identity != "none" else f"tick-{tick}"
+        candidate = avo_experiment_candidate(row)
         if action == "accept" and objective is not None:
             score_after = objective
             if delta is not None:
@@ -670,9 +746,7 @@ def avo_command(
                     score_before = float(objective) - float(delta)
     summary = summarize(row.get("reason"), row.get("note"), fallback=f"{action} tick {tick}")
     if action == "accept" and correct is False:
-        marker = "not kept: correct is false"
-        if marker not in summary:
-            summary = summarize(f"{summary}; {marker}", fallback=marker)
+        summary = keep_marker(summary, "not kept: correct is false")
     return receipt_tail(
         card,
         run_id,
@@ -788,10 +862,20 @@ def load_rows(path: pathlib.Path, *, strict: bool) -> list[tuple[int, str, dict[
         if kind is None:
             if strict:
                 raise PublishError(f"{where}: unrecognized row")
-            print(f"warning: {where}: skipping unrecognized row", file=sys.stderr)
+            rows.append((lineno, "unrecognized", obj))
             continue
         rows.append((lineno, kind, obj))
     return rows
+
+
+def loose_timestamp(obj: dict[str, Any]) -> dt.datetime | None:
+    """Best timestamp on a row that was not classified."""
+    for key in ("ts", "occurred_at", "run"):
+        if obj.get(key) is not None:
+            parsed = parse_time(obj.get(key))
+            if parsed is not None:
+                return parsed
+    return None
 
 
 def _in_since_window(kind: str, obj: dict[str, Any], since: dt.datetime | None) -> bool:
@@ -835,12 +919,21 @@ def build_receipt_commands(
             loaded.append((path, lineno, kind, obj))
     events = [obj for _, _, kind, obj in loaded if kind == "event"]
     sole = sole_objective_carriers(events)
-    avo_sole = sole_avo_objective_carriers([obj for _, _, kind, obj in loaded if kind == "avo"])
+    avo_sole = sole_avo_objective_carriers(
+        [obj for _, _, kind, obj in loaded if kind == "avo"],
+        loop=loop,
+    )
     commands: list[list[str]] = []
     undated = 0
     avo_without_metric = False
     for path, lineno, kind, obj in loaded:
         where = f"{path}:{lineno}"
+        if kind == "unrecognized":
+            stamped = loose_timestamp(obj)
+            if since is not None and stamped is not None and stamped < since:
+                continue
+            print(f"warning: {where}: skipping unrecognized row", file=sys.stderr)
+            continue
         visible = _in_since_window(kind, obj, since)
         if kind == "event":
             event_type = obj.get("type")
@@ -950,22 +1043,27 @@ def build_manifest_commands(
         raise PublishError(
             "cron is not a simple schedule; pass --every with a duration such as 30m, 1h, or 1d"
         )
-    tail = ["work", "cadence", card, "--every", chosen]
+    card = positional_ref(card, "card ref")
+    tail = ["work", "cadence", card, bound_flag("--every", chosen)]
     budget = manifest.get("progress_budget_seconds")
     if budget is not None:
         if isinstance(budget, bool) or not isinstance(budget, int):
             raise PublishError("progress_budget_seconds must be a positive integer or null")
-        tail.extend(["--budget", format_seconds(budget)])
-    tail.extend(["--stop-rule", manifest["stop_rule"]])
+        tail.append(bound_flag("--budget", format_seconds(budget)))
+    tail.append(bound_flag("--stop-rule", manifest["stop_rule"]))
     commands = [with_anx(anx, workspace, tail)]
     if goal_metric and direction:
-        goal = ["work", "goal", card, "--metric", goal_metric, "--direction", direction]
+        goal = [
+            "work", "goal", card,
+            bound_flag("--metric", goal_metric),
+            bound_flag("--direction", direction),
+        ]
         if target is not None:
-            goal.extend(["--target", canonical_flag_number(target, "--target")])
+            goal.append(bound_flag("--target", canonical_flag_number(target, "--target")))
         if baseline is not None:
-            goal.extend(["--baseline", canonical_flag_number(baseline, "--baseline")])
+            goal.append(bound_flag("--baseline", canonical_flag_number(baseline, "--baseline")))
         if unit is not None:
-            goal.extend(["--unit", unit.strip()])
+            goal.append(bound_flag("--unit", unit.strip()))
         commands.append(with_anx(anx, workspace, goal))
     return commands
 
