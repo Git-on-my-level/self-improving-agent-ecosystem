@@ -568,7 +568,8 @@ def cmd_tick(argv):
         print("no command: pass `-- <cmd...>` or set \"command\" in the manifest", file=sys.stderr)
         return EXIT_MANIFEST
 
-    print(f"PATH={os.environ.get('PATH', '')}", file=sys.stderr)
+    if os.environ.get("LOOP_TICK_DEBUG"):
+        print(f"PATH={os.environ.get('PATH', '')}", file=sys.stderr)
     missing = missing_binaries(manifest.get("requires", []))
     ledger = expand_ledger(manifest)
     if missing:
