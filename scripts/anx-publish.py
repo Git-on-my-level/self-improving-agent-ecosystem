@@ -27,6 +27,10 @@ from typing import Any
 SUMMARY_LIMIT = 280
 METRIC_LIMIT = 16
 RECEIPT_PREFIX = "LOOP_RECEIPT "
+METRIC_REF_PREFIX = "metric:"
+AMBIGUOUS_EFFECT_WARNING = (
+    "warning: several effects have metric_after; pass --goal-effect to choose the goal metric"
+)
 OUTCOMES = ("acted", "measured", "no_op", "infra_error")
 DECISIONS = ("kept", "reverted", "rejected")
 
@@ -208,6 +212,21 @@ def keep_marker(text: str, marker: str) -> str:
     if not body:
         return marker[:SUMMARY_LIMIT]
     return f"{body}{suffix}"
+
+
+def metric_ref_name(ref: Any) -> str | None:
+    """Return ``<name>`` for a ``metric:<name>`` effect ref that can be a metric.
+
+    ANX accepts only http(s) effect refs, so these are recorded as metrics
+    instead of ``--ref``. An invalid name returns None; the caller still
+    must not forward the ref.
+    """
+    if not isinstance(ref, str) or not ref.startswith(METRIC_REF_PREFIX):
+        return None
+    name = ref[len(METRIC_REF_PREFIX):]
+    if not valid_metric_name(name):
+        return None
+    return name
 
 
 def safe_ref(value: Any) -> str | None:
@@ -767,8 +786,15 @@ def loop_command(
     *,
     card: str,
     goal_metric: str | None,
+    goal_effect: str | None,
     where: str,
-) -> list[str]:
+) -> tuple[list[str], bool]:
+    """Map one loop receipt.
+
+    The second value is true when this row refused to guess the goal metric
+    because several effects have a finite ``metric_after`` and ``--goal-effect``
+    was not set. The caller warns once per run, not once per row.
+    """
     loop_id = row.get("loop")
     run = row.get("run")
     outcome = row.get("outcome")
@@ -784,19 +810,41 @@ def loop_command(
     if not isinstance(effects, list):
         raise PublishError(f"{where}: effects must be a list")
     metrics = numeric_metrics(row.get("metrics"))
+    explicit_metrics = set(metrics)
     refs: list[str] = []
-    last_after: int | float | None = None
+    finite_count = 0
+    sole_after: int | float | None = None
+    matched_after: int | float | None = None
     for effect in effects:
         if not isinstance(effect, dict):
             raise PublishError(f"{where}: each effect must be an object")
-        ref = safe_ref(effect.get("ref"))
-        if ref:
-            refs.append(ref)
-        if is_finite_number(effect.get("metric_after")):
-            last_after = effect["metric_after"]
-    if goal_metric and goal_metric not in metrics and last_after is not None:
-        metrics[goal_metric] = last_after
-    return receipt_tail(
+        ref = effect.get("ref")
+        after = effect.get("metric_after")
+        finite = after if is_finite_number(after) else None
+        if finite is not None:
+            finite_count += 1
+            sole_after = finite
+        name = metric_ref_name(ref)
+        if isinstance(ref, str) and ref.startswith(METRIC_REF_PREFIX):
+            # ANX drops non-http(s) effect refs. Keep the measurement as a metric.
+            if name is not None and finite is not None and name not in metrics:
+                metrics[name] = finite
+        else:
+            kept = safe_ref(ref)
+            if kept:
+                refs.append(kept)
+        if goal_effect is not None and ref == goal_effect and finite is not None:
+            matched_after = finite
+    ambiguous = False
+    if goal_metric and goal_metric not in explicit_metrics:
+        if goal_effect is not None:
+            if matched_after is not None:
+                metrics[goal_metric] = matched_after
+        elif finite_count == 1 and sole_after is not None:
+            metrics[goal_metric] = sole_after
+        elif finite_count > 1:
+            ambiguous = True
+    command = receipt_tail(
         card,
         f"{loop_id.strip()}:{run.strip()}",
         outcome,
@@ -806,6 +854,7 @@ def loop_command(
         refs=dedupe(refs),
         started_at=format_rfc3339(run),
     )
+    return command, ambiguous
 
 
 def classify(obj: dict[str, Any], hint: str | None) -> str | None:
@@ -910,9 +959,20 @@ def build_receipt_commands(
     anx: str,
     workspace: str | None,
     strict: bool = False,
+    goal_effect: str | None = None,
 ) -> list[list[str]]:
     if goal_metric is not None and not valid_metric_name(goal_metric):
         raise PublishError("--goal-metric must be a single-line name without '='")
+    if goal_effect is not None:
+        if goal_metric is None:
+            raise PublishError("--goal-effect requires --goal-metric")
+        if (
+            not isinstance(goal_effect, str)
+            or not goal_effect
+            or goal_effect != goal_effect.strip()
+            or any(char in goal_effect for char in "\n\r")
+        ):
+            raise PublishError("--goal-effect must be a single-line effect ref")
     loaded: list[tuple[pathlib.Path, int, str, dict[str, Any]]] = []
     for path in paths:
         for lineno, kind, obj in load_rows(path, strict=strict):
@@ -926,6 +986,7 @@ def build_receipt_commands(
     commands: list[list[str]] = []
     undated = 0
     avo_without_metric = False
+    ambiguous_goal = False
     for path, lineno, kind, obj in loaded:
         where = f"{path}:{lineno}"
         if kind == "unrecognized":
@@ -935,6 +996,7 @@ def build_receipt_commands(
             print(f"warning: {where}: skipping unrecognized row", file=sys.stderr)
             continue
         visible = _in_since_window(kind, obj, since)
+        ambiguous = False
         if kind == "event":
             event_type = obj.get("type")
             if isinstance(event_type, str) and event_type not in EVENT_OUTCOMES and event_type not in INTERMEDIATE_EVENT_TYPES:
@@ -956,7 +1018,9 @@ def build_receipt_commands(
                 obj, card=card, goal_metric=goal_metric, loop=loop, where=where, sole_carriers=avo_sole,
             )
         else:
-            tail = loop_command(obj, card=card, goal_metric=goal_metric, where=where)
+            tail, ambiguous = loop_command(
+                obj, card=card, goal_metric=goal_metric, goal_effect=goal_effect, where=where,
+            )
         if tail is None:
             continue
         stamped = row_timestamp(kind, obj)
@@ -967,6 +1031,8 @@ def build_receipt_commands(
                 continue
         if kind == "avo" and goal_metric is None:
             avo_without_metric = True
+        if kind == "receipt" and ambiguous:
+            ambiguous_goal = True
         commands.append(with_anx(anx, workspace, tail))
     if since is not None and undated:
         if undated == 1:
@@ -981,6 +1047,8 @@ def build_receipt_commands(
             "warning: AVO rows omit the hill-climb metric unless --goal-metric is set",
             file=sys.stderr,
         )
+    if ambiguous_goal:
+        print(AMBIGUOUS_EFFECT_WARNING, file=sys.stderr)
     return commands
 
 
@@ -1107,7 +1175,14 @@ def build_parser() -> argparse.ArgumentParser:
     receipts = sub.add_parser("receipts", parents=[common], help="publish run receipts from a ledger")
     receipts.add_argument("--card", required=True, help="ANX card ref, for example card:example")
     receipts.add_argument("--input", action="append", required=True, type=pathlib.Path, help="JSONL ledger; repeatable")
-    receipts.add_argument("--goal-metric", help="metric name for AVO objectives and receipt effects")
+    receipts.add_argument(
+        "--goal-metric",
+        help="metric name for AVO objectives and the selected receipt effect",
+    )
+    receipts.add_argument(
+        "--goal-effect",
+        help="effect ref whose metric_after supplies --goal-metric; exact match",
+    )
     receipts.add_argument("--since", help="include rows at or after this RFC3339 timestamp")
     receipts.add_argument("--loop", help="loop id used in AVO run ids when a row omits one")
     receipts.add_argument(
@@ -1143,6 +1218,7 @@ def main(argv: list[str] | None = None) -> int:
                 list(args.input),
                 card=card,
                 goal_metric=args.goal_metric,
+                goal_effect=args.goal_effect,
                 since=since,
                 loop=args.loop,
                 anx=anx,

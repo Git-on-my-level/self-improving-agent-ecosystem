@@ -36,8 +36,18 @@ still sent; publishing them again is a no-op.
 Other flags:
 
 - `--goal-metric <name>` — AVO `objective` values, and a loop receipt's
-  `metric_after` when that name is not already in `metrics`, are sent as
-  `--metric <name>=<value>`. Names may contain spaces and may not contain `=`.
+  selected `metric_after` when that name is not already in `metrics`, are
+  sent as `--metric <name>=<value>`. Names may contain spaces and may not
+  contain `=`.
+- `--goal-effect <ref>` — loop receipts only. The goal metric takes
+  `metric_after` from the effect whose `ref` equals this value exactly, for
+  example `metric:firestore.read_count.24h`. If that effect is absent, or its
+  `metric_after` is not finite, that row does not set the goal metric. Without
+  this flag, a row sets the goal metric only when exactly one effect has a
+  finite `metric_after`. When several do, the goal metric stays unset and the
+  process warns once on stderr, not once per row, to pass `--goal-effect`.
+  Requires `--goal-metric`. An explicit `metrics` value for the goal name is
+  kept.
 - `--loop <id>` — loop id used in AVO run ids when the row does not carry one.
   The default segment is `avo`.
 - `--workspace <alias>` — passed through as `anx --workspace <alias> ...`.
@@ -74,6 +84,8 @@ fields: the publisher copies them and does not redact them.
 Local evidence paths and `file:` URIs are not forwarded. A Windows
 drive-relative path such as `c:private/report.json` is a local path, not a
 typed ref. `http` and `https` URLs and typed refs such as `card:example` are.
+A loop-receipt effect whose ref is `metric:<name>` is the exception: it is
+recorded as a named metric, not forwarded as a ref.
 
 ## Event stream
 
@@ -211,9 +223,16 @@ line, optionally prefixed with `LOOP_RECEIPT `:
 ```
 
 `outcome` is copied. The summary is `error`, then `note`, then `reason`.
-Effect refs are forwarded when they are URLs or typed refs. `--started-at` is
-`run`. The run id keeps the original `run` string, so `Z` and `+00:00` stay
-distinct ids even though they are the same instant.
+`http` and `https` effect refs, and other typed refs such as `card:example`,
+are forwarded. A `metric:<name>` ref is not an effect ref: ANX accepts only
+http(s) effect refs, so a finite `metric_after` is recorded as the receipt
+metric `<name>` (for example `firestore.read_count.24h`). An explicit
+`metrics` entry with that name wins; otherwise the first finite value is
+kept. Those metrics use the same bounds and order as any other receipt: at
+most 16, the goal metric first when it is present, then the rest by name.
+`--goal-metric` is filled from effects only by the `--goal-effect` rule
+above. `--started-at` is `run`. The run id keeps the original `run` string,
+so `Z` and `+00:00` stay distinct ids even though they are the same instant.
 
 ## Manifest
 
@@ -250,4 +269,6 @@ duration. Pass `--every`.
 A goal is emitted only when both `--goal-metric` and `--direction` are set.
 The manifest records the metric name and not the direction, so the direction
 has to be chosen here. Optional `--target`, `--baseline`, and `--unit` are
-forwarded. Host names and ledger paths are not sent.
+forwarded. Host names and ledger paths are not sent. Manifest mode does not
+read ledger effects. `--goal-effect` is a `receipts` flag: it selects which
+effect's `metric_after` fills `--goal-metric` when publishing a loop receipt.

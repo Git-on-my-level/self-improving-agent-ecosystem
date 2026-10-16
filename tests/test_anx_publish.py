@@ -350,6 +350,207 @@ class AvoAndReceiptTests(unittest.TestCase):
         self.assertEqual(flag(broken, "--summary"), "E" * 280)
         self.assertEqual(flag(broken, "--started-at"), "2026-04-02T02:00:00Z")
 
+    def test_goal_effect_picks_the_matching_metric_after(self):
+        effects = [
+            {
+                "ref": "metric:firestore.read_count.24h",
+                "metric_before": 806924584,
+                "metric_after": 762431713,
+            },
+            {
+                "ref": "metric:firestore.read_count.per_hour_fast",
+                "metric_before": 32287839,
+                "metric_after": 32425550,
+            },
+        ]
+        matched = {
+            "loop": "example-watch",
+            "run": "2026-04-02T00:00:00Z",
+            "outcome": "measured",
+            "note": "reads",
+            "metrics": {"samples": 12},
+            "effects": effects,
+        }
+        absent = {
+            "loop": "example-watch",
+            "run": "2026-04-02T01:00:00Z",
+            "outcome": "measured",
+            "note": "other series only",
+            "effects": [effects[1]],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "firestore.jsonl"
+            write_jsonl(path, [matched, absent])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                commands = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                    anx="anx", workspace=None, goal_effect="metric:firestore.read_count.24h",
+                )
+        self.assertEqual(stderr.getvalue(), "")
+        found = by_run(commands)
+        chosen = found["example-watch:2026-04-02T00:00:00Z"]
+        self.assertEqual(flags(chosen, "--metric"), [
+            "reads_24h=762431713",
+            "firestore.read_count.24h=762431713",
+            "firestore.read_count.per_hour_fast=32425550",
+            "samples=12",
+        ])
+        self.assertEqual(flags(chosen, "--ref"), [])
+        self.assertNotIn("metric:firestore", json.dumps(chosen))
+        missed = found["example-watch:2026-04-02T01:00:00Z"]
+        self.assertEqual(flags(missed, "--metric"), ["firestore.read_count.per_hour_fast=32425550"])
+        self.assertNotIn("reads_24h", json.dumps(missed))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "firestore.jsonl"
+            write_jsonl(path, [matched])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                per_hour = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                    anx="anx", workspace=None,
+                    goal_effect="metric:firestore.read_count.per_hour_fast",
+                )[0]
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(flags(per_hour, "--metric")[0], "reads_24h=32425550")
+
+    def test_several_effects_do_not_guess_the_goal_metric(self):
+        effects = [
+            {
+                "ref": "metric:firestore.read_count.24h",
+                "metric_before": 806924584,
+                "metric_after": 762431713,
+            },
+            {
+                "ref": "metric:firestore.read_count.per_hour_fast",
+                "metric_before": 32287839,
+                "metric_after": 32425550,
+            },
+        ]
+        rows = [
+            {
+                "loop": "example-watch",
+                "run": f"2026-04-02T0{index}:00:00Z",
+                "outcome": "measured",
+                "note": "reads",
+                "metrics": {"samples": 12},
+                "effects": effects,
+            }
+            for index in (0, 1)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "firestore.jsonl"
+            write_jsonl(path, rows)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                commands = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                    anx="anx", workspace=None,
+                )
+        warning = stderr.getvalue()
+        self.assertEqual(warning.count(anx.AMBIGUOUS_EFFECT_WARNING), 1)
+        self.assertIn("--goal-effect", warning)
+        self.assertEqual(warning.count("\n"), 1)
+        for command in commands:
+            self.assertEqual(flags(command, "--metric"), [
+                "firestore.read_count.24h=762431713",
+                "firestore.read_count.per_hour_fast=32425550",
+                "samples=12",
+            ])
+            self.assertNotIn("reads_24h", json.dumps(command))
+            self.assertEqual(flags(command, "--ref"), [])
+
+    def test_single_effect_sets_the_goal_metric(self):
+        row = {
+            "loop": "example-watch",
+            "run": "2026-04-02T00:00:00Z",
+            "outcome": "measured",
+            "note": "one series",
+            "effects": [
+                {
+                    "ref": "metric:firestore.read_count.24h",
+                    "metric_before": 806924584,
+                    "metric_after": 762431713,
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "one.jsonl"
+            write_jsonl(path, [row])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                command = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                    anx="anx", workspace=None,
+                )[0]
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(flags(command, "--metric"), [
+            "reads_24h=762431713",
+            "firestore.read_count.24h=762431713",
+        ])
+        self.assertEqual(flags(command, "--ref"), [])
+
+    def test_metric_ref_becomes_a_named_metric(self):
+        row = {
+            "loop": "example-watch",
+            "run": "2026-04-02T00:00:00Z",
+            "outcome": "acted",
+            "note": "mixed refs",
+            "effects": [
+                {"ref": "https://example.com/pr/1", "metric_before": 10, "metric_after": 12},
+                {
+                    "ref": "metric:firestore.read_count.24h",
+                    "metric_before": 806924584,
+                    "metric_after": 762431713,
+                },
+                {"ref": "card:example"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "mixed.jsonl"
+            write_jsonl(path, [row])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                command = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                    anx="anx", workspace=None,
+                    goal_effect="metric:firestore.read_count.24h",
+                )[0]
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(flags(command, "--ref"), ["https://example.com/pr/1", "card:example"])
+        self.assertEqual(flags(command, "--metric"), [
+            "reads_24h=762431713",
+            "firestore.read_count.24h=762431713",
+        ])
+        self.assertNotIn("metric:firestore.read_count.24h", json.dumps(command))
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "mixed.jsonl"
+            write_jsonl(path, [row])
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = anx.main([
+                    "receipts", "--card", "card:x", "--input", str(path),
+                    "--goal-metric", "reads_24h",
+                    "--goal-effect", "metric:firestore.read_count.24h",
+                ])
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertEqual(stderr.getvalue(), "")
+            cli = json.loads(stdout.getvalue())
+            self.assertEqual(flags(cli, "--metric")[0], "reads_24h=762431713")
+            self.assertEqual(flags(cli, "--ref"), ["https://example.com/pr/1", "card:example"])
+
+            missing = io.StringIO()
+            with contextlib.redirect_stderr(missing):
+                code = anx.main([
+                    "receipts", "--card", "card:x", "--input", str(path),
+                    "--goal-effect", "metric:firestore.read_count.24h",
+                ])
+            self.assertEqual(code, 2)
+            self.assertIn("--goal-metric", missing.getvalue())
+
     def test_summary_truncation_counts_characters(self):
         reason = "é" * 281
         row = minimal_event("event-unicode", "no_action", result={"status": "no_action", "reason": reason})
