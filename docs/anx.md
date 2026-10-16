@@ -130,16 +130,21 @@ is the event that records `reverted`.
 ## AVO-lite ledger
 
 AVO remains the authority for attempts and accepted commits. This publisher
-reads the ledger; it does not import or vendor AVO-lite. The row shape is the
-one `scripts/avo-to-event.py` already consumes: `action`, `objective`,
-`delta`, `commit`, `note`, `tick`, `metrics`, `correct`, plus `ts` and
-`diff_hash` when present.
+reads the ledger; it does not import or vendor AVO-lite. Each line is
+classified on its own, so a file may mix shapes.
+
+The flat shape is the one `scripts/avo-to-event.py` already consumes:
+`action`, `objective`, `delta`, `commit`, `note`, `tick`, `metrics`,
+`correct`, plus `ts` and `diff_hash` when present. Newer ledgers use `event`
+as the action name and nest `objective`, `delta`, `metrics`, and `correct`
+under `score`. `base` names the attempt the same way `commit` does. The
+summary is `reason`, then `note`.
 
 | Action | Outcome | Decision | Scores |
 | --- | --- | --- | --- |
 | `baseline` | measured | — | goal metric = objective |
 | `rebaseline` | measured | — | goal metric = objective; summary is the note. Resets the incumbent and carries no experiment decision |
-| `accept` | acted | kept | score-before = objective − delta, score-after = objective, goal metric = objective |
+| `accept` | acted | kept | score-before = objective − delta, score-after = objective, goal metric = objective. `correct: false` (flat or under `score`) is measured / rejected, and the summary says it was not kept |
 | `reject` | measured | rejected | goal metric = objective |
 | `error` | measured | rejected | same outcome as `candidate_failed`; goal metric when objective is present |
 | `candidate` | skipped | lifecycle | published as measured only when it alone carries the attempt's objective |
@@ -153,26 +158,33 @@ skips them because they are not terminal candidate events. `rebaseline` is the
 explicit rescore of the current best after an evaluator change. Other numeric
 `metrics` are forwarded. When `--goal-metric` names a key that is also in
 `metrics`, the objective wins. Without `--goal-metric` the outcome is still
-published and a warning names the missing metric.
+published and a warning names the missing metric. At most 16 metrics are sent
+on any receipt. The goal metric is first when it is present; other finite
+numbers follow in name order. Booleans, strings, and non-finite values are
+dropped, and metrics past the cap are dropped.
 
 `candidate`, `verify`, and `budget` are lifecycle rows for one attempt, the
 same kind of marker as `candidate_started` and `candidate_built`. A row is
 published as `measured`, with no experiment decision, only when it has a
 numeric `objective` and no `baseline`, `rebaseline`, `accept`, `reject`, or
-`error` row for that same candidate also has a numeric objective. The
-candidate key is `tick` plus `diff_hash`. The placeholder hashes `baseline`
-and `rebaseline` are not attempt ids; those rows group by `commit`. A
-lifecycle row with neither a patch hash nor a commit stays skipped.
+`error` row for that same attempt also has a numeric objective. A real
+`diff_hash` is the attempt. Rows that use `event` share their `tick`, so a
+lifecycle line is tied to the baseline or reject on that tick. Flat rows
+without a patch hash group by `base` or `commit`. Placeholder hashes
+`baseline` and `rebaseline` are not attempt ids. A lifecycle row with no
+attempt key stays skipped. A file whose first line is one of these rows is
+still published.
 
 Any other action (`reflect`, `preview`, `stalled`, `supervisor_error`, and
 anything new) is skipped. Stderr gets one warning line with `file:line` and
 the action, and the rest of the file is still published. A malformed JSON
-line is skipped the same way. `--strict` restores fail-fast for all three.
+line, and a JSON object that is not an event, an AVO row, or a loop receipt,
+are skipped the same way. `--strict` restores fail-fast for all of these.
 `--since` still bounds which warnings are printed: a mapped or unmapped row
 older than the watermark is silent. A line that is not JSON has no timestamp,
 so it always warns.
 
-The experiment candidate is the commit, otherwise the diff hash.
+The experiment candidate is `base` or `commit`, otherwise the diff hash.
 `--started-at` is `ts`. Ledger fields such as `run_dir` are not forwarded.
 
 ## Loop receipts

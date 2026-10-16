@@ -446,6 +446,132 @@ class AvoAndReceiptTests(unittest.TestCase):
         self.assertIn("unknown AVO action 'reflect'", warning)
         self.assertEqual(warning.count("warning:"), 1)
 
+    def test_nested_event_ledger_mixes_with_flat_rows(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            commands = anx.build_receipt_commands(
+                [FIXTURES / "avo-nested.jsonl"],
+                card="card:x", goal_metric="f1", since=None, loop="improve",
+                anx="anx", workspace=None,
+            )
+        found = by_run(commands)
+        rendered = json.dumps(commands)
+        self.assertNotIn("eval-v1", rendered)
+        self.assertNotIn("screen-label", rendered)
+        self.assertNotIn("spent_usd", rendered)
+        self.assertNotIn("reservation", rendered)
+        self.assertNotIn("attempt-slot", rendered)
+        self.assertNotIn("supported_threshold_only", rendered)
+        self.assertNotIn("checks=", rendered)
+        self.assertNotIn("held on the fixture set", rendered)
+
+        baseline = found["avo:improve:1:abc123def456:baseline"]
+        self.assertEqual(flag(baseline, "--outcome"), "measured")
+        self.assertIsNone(flag(baseline, "--decision"))
+        self.assertEqual(
+            flags(baseline, "--metric"),
+            ["f1=1", "hits=30", "usd_per_1k_screens=4.5"],
+        )
+        self.assertNotIn("avo:improve:1:abc123def456:verify", found)
+        self.assertNotIn("avo:improve:1:abc123def456:candidate", found)
+        self.assertNotIn("avo:improve:1:abc123def456:budget", found)
+
+        rejected = found["avo:improve:1:abc123def456:reject"]
+        self.assertEqual(flag(rejected, "--outcome"), "measured")
+        self.assertEqual(flag(rejected, "--decision"), "rejected")
+        self.assertEqual(flag(rejected, "--summary"), "noise margin")
+        self.assertEqual(flag(rejected, "--metric"), "f1=1.5")
+
+        failed = found["avo:improve:2:bbbbccccdddd:accept"]
+        self.assertEqual(flag(failed, "--outcome"), "measured")
+        self.assertEqual(flag(failed, "--decision"), "rejected")
+        self.assertEqual(flag(failed, "--score-before"), "2")
+        self.assertEqual(flag(failed, "--score-after"), "2.5")
+        self.assertIn("not kept: correct is false", flag(failed, "--summary"))
+        self.assertIn("gate failed", flag(failed, "--summary"))
+
+        lone = found["avo:improve:4:dddddddddddd:candidate"]
+        self.assertEqual(flag(lone, "--outcome"), "measured")
+        self.assertIsNone(flag(lone, "--decision"))
+        self.assertEqual(flag(lone, "--metric"), "f1=4")
+
+        kept = found["avo:improve:3:ccc111ddd222:accept"]
+        self.assertEqual(flag(kept, "--outcome"), "acted")
+        self.assertEqual(flag(kept, "--decision"), "kept")
+        self.assertEqual(flag(kept, "--score-before"), "2")
+        self.assertEqual(flag(kept, "--score-after"), "3")
+
+        self.assertIn("avo-nested.jsonl:9", stderr.getvalue())
+        self.assertIn("skipping unrecognized row", stderr.getvalue())
+        with self.assertRaises(anx.PublishError) as caught:
+            anx.build_receipt_commands(
+                [FIXTURES / "avo-nested.jsonl"],
+                card="card:x", goal_metric="f1", since=None, loop="improve",
+                anx="anx", workspace=None, strict=True,
+            )
+        self.assertIn("unrecognized row", str(caught.exception))
+
+    def test_lifecycle_first_line_does_not_abort(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "ledger.jsonl"
+            path.write_text(
+                "\n".join([
+                    json.dumps({
+                        "ts": "2026-05-01T00:00:00Z", "tick": 1, "event": "budget",
+                        "spent_usd": 0.0, "reservation": "attempt",
+                    }),
+                    json.dumps({
+                        "ts": "2026-05-01T00:01:00Z", "tick": 1, "event": "baseline",
+                        "base": "abc123def456",
+                        "score": {"correct": True, "objective": 1, "metrics": {"f1": 1}},
+                        "note": "baseline score",
+                    }),
+                    json.dumps({"hello": "world"}),
+                    json.dumps({
+                        "ts": "2026-05-01T00:02:00Z", "tick": 5, "action": "accept",
+                        "correct": False, "objective": 4, "delta": 1, "commit": "eeeeffff0000",
+                        "note": "flat gate",
+                    }),
+                ]) + "\n"
+            )
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                commands = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="f1", since=None, loop="improve",
+                    anx="anx", workspace=None,
+                )
+        found = by_run(commands)
+        self.assertIn("avo:improve:1:abc123def456:baseline", found)
+        demoted = found["avo:improve:5:eeeeffff0000:accept"]
+        self.assertEqual(flag(demoted, "--outcome"), "measured")
+        self.assertEqual(flag(demoted, "--decision"), "rejected")
+        self.assertIn("flat gate", flag(demoted, "--summary"))
+        self.assertIn("not kept: correct is false", flag(demoted, "--summary"))
+        self.assertIn("ledger.jsonl:3", stderr.getvalue())
+        self.assertIn("skipping unrecognized row", stderr.getvalue())
+
+    def test_metric_cap_keeps_goal_metric_first(self):
+        metrics = {f"m{i:02d}": i for i in range(20)}
+        metrics["ready"] = True
+        metrics["label"] = "drop"
+        row = {
+            "tick": 1, "action": "baseline", "objective": 9, "note": "capped",
+            "commit": "abc123def456", "metrics": metrics, "ts": "2026-05-02T00:00:00Z",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "wide.jsonl"
+            write_jsonl(path, [row])
+            command = anx.build_receipt_commands(
+                [path], card="card:x", goal_metric="zed", since=None, loop="improve",
+                anx="anx", workspace=None,
+            )[0]
+        names = [item.split("=", 1)[0] for item in flags(command, "--metric")]
+        self.assertEqual(len(names), 16)
+        self.assertEqual(names[0], "zed")
+        self.assertEqual(names[1:], [f"m{i:02d}" for i in range(15)])
+        self.assertNotIn("ready", names)
+        self.assertNotIn("label", names)
+
     def test_unknown_action_and_event_skip_unless_strict(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

@@ -24,6 +24,7 @@ import sys
 from typing import Any
 
 SUMMARY_LIMIT = 280
+METRIC_LIMIT = 16
 RECEIPT_PREFIX = "LOOP_RECEIPT "
 OUTCOMES = ("acted", "measured", "no_op", "infra_error")
 DECISIONS = ("kept", "reverted", "rejected")
@@ -235,6 +236,26 @@ def numeric_metrics(raw: Any) -> dict[str, int | float]:
     return found
 
 
+def bounded_metrics(
+    metrics: dict[str, int | float] | None,
+    goal_metric: str | None,
+) -> list[tuple[str, int | float]]:
+    """Goal metric first, then the rest by name. At most METRIC_LIMIT."""
+    clean = {
+        key: value
+        for key, value in (metrics or {}).items()
+        if valid_metric_name(key) and is_finite_number(value)
+    }
+    ordered: list[tuple[str, int | float]] = []
+    if goal_metric and goal_metric in clean:
+        ordered.append((goal_metric, clean[goal_metric]))
+    for name in sorted(clean):
+        if name == goal_metric:
+            continue
+        ordered.append((name, clean[name]))
+    return ordered[:METRIC_LIMIT]
+
+
 def format_seconds(seconds: int) -> str:
     if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0:
         raise PublishError("progress_budget_seconds must be a positive integer or null")
@@ -327,6 +348,7 @@ def receipt_tail(
     summary: str,
     *,
     metrics: dict[str, int | float] | None = None,
+    goal_metric: str | None = None,
     candidate: str | None = None,
     decision: str | None = None,
     score_before: int | float | None = None,
@@ -344,8 +366,8 @@ def receipt_tail(
         "--outcome", outcome,
         "--summary", summary,
     ]
-    for name in sorted(metrics or {}):
-        argv.extend(["--metric", f"{name}={format_number((metrics or {})[name])}"])
+    for name, value in bounded_metrics(metrics, goal_metric):
+        argv.extend(["--metric", f"{name}={format_number(value)}"])
     if decision is not None:
         if decision not in DECISIONS:
             raise PublishError(f"unknown decision: {decision}")
@@ -461,6 +483,7 @@ def event_command(
         outcome,
         summarize(reason, fallback=kind),
         metrics=metrics,
+        goal_metric=goal_metric,
         candidate=candidate,
         decision=decision,
         score_after=score_after,
@@ -469,10 +492,70 @@ def event_command(
     )
 
 
+def avo_action_name(row: dict[str, Any]) -> str | None:
+    """`event` is the newer alias for `action`."""
+    for field in ("action", "event"):
+        value = row.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _avo_score(row: dict[str, Any]) -> dict[str, Any]:
+    score = row.get("score")
+    return score if isinstance(score, dict) else {}
+
+
+def avo_objective(row: dict[str, Any]) -> int | float | None:
+    if is_finite_number(row.get("objective")):
+        return row["objective"]
+    nested = _avo_score(row).get("objective")
+    if is_finite_number(nested):
+        return nested
+    return None
+
+
+def avo_delta(row: dict[str, Any]) -> int | float | None:
+    if is_finite_number(row.get("delta")):
+        return row["delta"]
+    nested = _avo_score(row).get("delta")
+    if is_finite_number(nested):
+        return nested
+    return None
+
+
+def avo_correct(row: dict[str, Any]) -> bool | None:
+    if isinstance(row.get("correct"), bool):
+        return row["correct"]
+    nested = _avo_score(row).get("correct")
+    if isinstance(nested, bool):
+        return nested
+    return None
+
+
+def avo_metric_map(row: dict[str, Any]) -> dict[str, int | float]:
+    found: dict[str, int | float] = {}
+    score = _avo_score(row)
+    if isinstance(score.get("metrics"), dict):
+        found.update(numeric_metrics(score["metrics"]))
+    if isinstance(row.get("metrics"), dict):
+        found.update(numeric_metrics(row["metrics"]))
+    return found
+
+
+def avo_attempt_ref(row: dict[str, Any]) -> str | None:
+    """`base` (newer ledgers) and `commit` (flat ledgers) name the attempt."""
+    for field in ("base", "commit"):
+        value = row.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def avo_identity(row: dict[str, Any]) -> str:
-    commit = row.get("commit")
-    if isinstance(commit, str) and commit.strip():
-        return commit.strip()
+    ref = avo_attempt_ref(row)
+    if ref:
+        return ref
     diff_hash = row.get("diff_hash")
     if isinstance(diff_hash, str) and diff_hash.strip() and diff_hash.strip() != "none":
         return diff_hash.strip()
@@ -482,15 +565,19 @@ def avo_identity(row: dict[str, Any]) -> str:
 def avo_candidate_key(row: dict[str, Any]) -> str | None:
     """Group AVO rows that belong to one attempt.
 
-    An attempt is ``tick`` plus a real ``diff_hash``. Placeholder hashes
-    (``baseline``, ``rebaseline``) are not attempts; those rows group by commit.
+    A real ``diff_hash`` is the attempt. Otherwise rows that use ``event``
+    share their ``tick``. Flat rows without a patch hash group by ``base`` or
+    ``commit``. Placeholder hashes (``baseline``, ``rebaseline``) are not
+    attempts.
     """
     diff = row.get("diff_hash")
     if isinstance(diff, str) and diff.strip() not in _AVO_PLACEHOLDER_DIFFS:
         return f"{avo_tick_token(row)}:{diff.strip()}"
-    commit = row.get("commit")
-    if isinstance(commit, str) and commit.strip():
-        return f"commit:{commit.strip()}"
+    if isinstance(row.get("event"), str) and not isinstance(row.get("action"), str) and "tick" in row:
+        return f"tick:{avo_tick_token(row)}"
+    ref = avo_attempt_ref(row)
+    if ref:
+        return f"commit:{ref}"
     return None
 
 
@@ -509,9 +596,9 @@ def sole_avo_objective_carriers(rows: list[dict[str, Any]]) -> set[str]:
     intermediate: set[str] = set()
     for row in rows:
         key = avo_candidate_key(row)
-        if key is None or not is_finite_number(row.get("objective")):
+        if key is None or avo_objective(row) is None:
             continue
-        action = row.get("action")
+        action = avo_action_name(row)
         if action in INTERMEDIATE_AVO_ACTIONS:
             intermediate.add(key)
         elif action in AVO_ACTIONS:
@@ -539,16 +626,19 @@ def avo_command(
     where: str,
     sole_carriers: set[str],
 ) -> list[str] | None:
-    action = row.get("action")
+    action = avo_action_name(row)
+    correct = avo_correct(row)
     if action in INTERMEDIATE_AVO_ACTIONS:
         key = avo_candidate_key(row)
-        if key is None or key not in sole_carriers or not is_finite_number(row.get("objective")):
+        if key is None or key not in sole_carriers or avo_objective(row) is None:
             return None
         outcome, decision = "measured", None
     elif action not in AVO_ACTIONS:
         raise PublishError(f"{where}: unknown AVO action {action!r}")
     else:
         outcome, decision = AVO_ACTIONS[action]
+        if action == "accept" and correct is False:
+            outcome, decision = "measured", "rejected"
     loop_id = row.get("loop")
     if isinstance(loop_id, str) and loop_id.strip():
         loop_name = loop_id.strip()
@@ -561,30 +651,35 @@ def avo_command(
     if any(char in identity for char in "\n\r") or any(char in loop_name for char in "\n\r"):
         raise PublishError(f"{where}: loop id and commit must be single-line")
     run_id = f"avo:{loop_name}:{tick}:{identity}:{action}"
-    objective = row.get("objective")
-    delta = row.get("delta")
-    metrics = numeric_metrics(row.get("metrics"))
-    if goal_metric and is_finite_number(objective):
+    objective = avo_objective(row)
+    delta = avo_delta(row)
+    metrics = avo_metric_map(row)
+    if goal_metric and objective is not None:
         metrics[goal_metric] = objective
     score_before = None
     score_after = None
     candidate = None
     if decision is not None:
         candidate = identity if identity != "none" else f"tick-{tick}"
-        if action == "accept":
-            if is_finite_number(objective):
-                score_after = objective
-            if is_finite_number(objective) and is_finite_number(delta):
+        if action == "accept" and objective is not None:
+            score_after = objective
+            if delta is not None:
                 if isinstance(objective, int) and isinstance(delta, int):
                     score_before = objective - delta
                 else:
                     score_before = float(objective) - float(delta)
+    summary = summarize(row.get("reason"), row.get("note"), fallback=f"{action} tick {tick}")
+    if action == "accept" and correct is False:
+        marker = "not kept: correct is false"
+        if marker not in summary:
+            summary = summarize(f"{summary}; {marker}", fallback=marker)
     return receipt_tail(
         card,
         run_id,
         outcome,
-        summarize(row.get("note"), fallback=f"{action} tick {tick}"),
+        summary,
         metrics=metrics,
+        goal_metric=goal_metric,
         candidate=candidate,
         decision=decision,
         score_before=score_before,
@@ -633,12 +728,14 @@ def loop_command(
         outcome,
         summarize(row.get("error"), row.get("note"), row.get("reason"), fallback=f"{outcome} {loop_id.strip()}"),
         metrics=metrics,
+        goal_metric=goal_metric,
         refs=dedupe(refs),
         started_at=format_rfc3339(run),
     )
 
 
-def classify(obj: dict[str, Any], hint: str | None) -> str:
+def classify(obj: dict[str, Any], hint: str | None) -> str | None:
+    """Return the row kind, or None when this line is not a known ledger row."""
     if hint == "receipt":
         return "receipt"
     kind = obj.get("type")
@@ -648,13 +745,15 @@ def classify(obj: dict[str, Any], hint: str | None) -> str:
         return "event"
     if obj.get("outcome") in OUTCOMES and "run" in obj:
         return "receipt"
-    if isinstance(obj.get("action"), str) and any(
-        key in obj for key in ("tick", "objective", "diff_hash", "delta", "commit", "note")
+    if avo_action_name(obj) and any(
+        key in obj
+        for key in (
+            "tick", "objective", "diff_hash", "delta", "commit", "base", "note",
+            "reason", "score", "metrics", "correct", "verdict",
+        )
     ):
         return "avo"
-    raise PublishError(
-        "unrecognized row; expected an ecosystem event, an AVO ledger row, or a loop receipt"
-    )
+    return None
 
 
 def load_rows(path: pathlib.Path, *, strict: bool) -> list[tuple[int, str, dict[str, Any]]]:
@@ -685,10 +784,12 @@ def load_rows(path: pathlib.Path, *, strict: bool) -> list[tuple[int, str, dict[
                 raise PublishError(f"{where}: expected a JSON object")
             print(f"warning: {where}: skipping malformed JSON (expected an object)", file=sys.stderr)
             continue
-        try:
-            kind = classify(obj, hint)
-        except PublishError as exc:
-            raise PublishError(f"{where}: {exc}") from exc
+        kind = classify(obj, hint)
+        if kind is None:
+            if strict:
+                raise PublishError(f"{where}: unrecognized row")
+            print(f"warning: {where}: skipping unrecognized row", file=sys.stderr)
+            continue
         rows.append((lineno, kind, obj))
     return rows
 
@@ -752,7 +853,7 @@ def build_receipt_commands(
                 obj, card=card, goal_metric=goal_metric, sole_carriers=sole, where=where,
             )
         elif kind == "avo":
-            action = obj.get("action")
+            action = avo_action_name(obj)
             if action not in AVO_ACTIONS and action not in INTERMEDIATE_AVO_ACTIONS:
                 _skip_unknown(
                     where, f"unknown AVO action {action!r}", strict=strict, visible=visible,
