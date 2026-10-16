@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "loop": "example-watch",
+  "host": "example-host",
+  "archetype": "maintain",
+  "goal_metric": "open items",
+  "authority": "pr",
+  "ledger": "receipts.jsonl",
+  "progress_budget_seconds": 86400,
+  "stop_rule": "ask the owner to retire the loop",
+  "cron": "example: the scheduler that fires this every 30 minutes"
+}

@@ -64,6 +64,11 @@ Export loop freshness and lineage gaps. Put a deadman outside the loop's host
 and delivery path. Test failure, observer blindness, stalled scheduling, and
 rollback—not just the happy path.
 
+The same ledger can be published to Agent Nexus. Run receipts there are how
+loop health, the hill-climb chart, and recent effects are computed. See
+[ANX receipts](anx.md). Publishing is optional, dry-run by default, and leaves
+loop authority unchanged.
+
 ## 8. Earn additional authority
 
 Expand one capability, for one class of action, at a time after a review
