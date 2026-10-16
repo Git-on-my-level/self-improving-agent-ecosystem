@@ -92,6 +92,8 @@ _AVO_PLACEHOLDER_DIFFS = frozenset({"", "none", "baseline", "rebaseline"})
 _DURATION_RE = re.compile(r"^[1-9][0-9]*[smhd]$")
 _ISO_TZ_FIX_RE = re.compile(r"([+-]\d{2})(\d{2})$")
 _TYPED_REF_RE = re.compile(r"^[a-z][a-z0-9_-]*:[A-Za-z0-9][A-Za-z0-9._~:/?#@!$&'()*+,;=%-]*$")
+# ANX metric names are 1–120 characters: a lowercase letter, then [a-z0-9_.-].
+_ANX_METRIC_NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,119}$")
 _NAMED_CRON = {
     "@hourly": "1h",
     "@daily": "1d",
@@ -215,16 +217,16 @@ def keep_marker(text: str, marker: str) -> str:
 
 
 def metric_ref_name(ref: Any) -> str | None:
-    """Return ``<name>`` for a ``metric:<name>`` effect ref that can be a metric.
+    """Return ``<name>`` when ``metric:<name>`` is an ANX metric name.
 
     ANX accepts only http(s) effect refs, so these are recorded as metrics
-    instead of ``--ref``. An invalid name returns None; the caller still
-    must not forward the ref.
+    instead of ``--ref``. Names must match ``^[a-z][a-z0-9_.-]{0,119}$``.
+    Anything else returns None; the caller still must not forward the ref.
     """
     if not isinstance(ref, str) or not ref.startswith(METRIC_REF_PREFIX):
         return None
     name = ref[len(METRIC_REF_PREFIX):]
-    if not valid_metric_name(name):
+    if _ANX_METRIC_NAME_RE.fullmatch(name) is None:
         return None
     return name
 

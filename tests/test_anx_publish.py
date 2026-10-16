@@ -642,6 +642,44 @@ class AvoAndReceiptTests(unittest.TestCase):
         self.assertEqual(flags(explicit_ambiguous[0], "--metric")[0], "reads_24h=111")
         self.assertNotIn("762431713", json.dumps(explicit_ambiguous[0]))
 
+    def test_effect_metric_names_follow_anx_grammar(self):
+        accepted = "a" * 120
+        too_long = "a" * 121
+        self.assertEqual(len(accepted), 120)
+        self.assertEqual(len(too_long), 121)
+        self.assertEqual(anx.metric_ref_name("metric:" + accepted), accepted)
+        self.assertIsNone(anx.metric_ref_name("metric:" + too_long))
+        self.assertIsNone(anx.metric_ref_name("metric:latency ms"))
+        self.assertIsNone(anx.metric_ref_name("metric:Reads"))
+        row = {
+            "loop": "example-watch",
+            "run": "2026-04-02T00:00:00Z",
+            "outcome": "measured",
+            "note": "names",
+            "effects": [
+                {"ref": "metric:" + accepted, "metric_after": 1},
+                {"ref": "metric:" + too_long, "metric_after": 2},
+                {"ref": "metric:latency ms", "metric_after": 3},
+                {"ref": "metric:Reads", "metric_after": 4},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "names.jsonl"
+            path.write_text("LOOP_RECEIPT " + json.dumps(row) + "\n")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                command = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric=None, since=None, loop=None,
+                    anx="anx", workspace=None,
+                )[0]
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(flags(command, "--metric"), [f"{accepted}=1"])
+        self.assertEqual(flags(command, "--ref"), [])
+        rendered = json.dumps(command)
+        self.assertNotIn(too_long, rendered)
+        self.assertNotIn("latency ms", rendered)
+        self.assertNotIn("Reads", rendered)
+
     def test_summary_truncation_counts_characters(self):
         reason = "é" * 281
         row = minimal_event("event-unicode", "no_action", result={"status": "no_action", "reason": reason})

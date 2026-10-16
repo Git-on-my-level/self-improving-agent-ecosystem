@@ -86,7 +86,8 @@ Local evidence paths and `file:` URIs are not forwarded. A Windows
 drive-relative path such as `c:private/report.json` is a local path, not a
 typed ref. `http` and `https` URLs and typed refs such as `card:example` are.
 A loop-receipt effect whose ref is `metric:<name>` is the exception: it is
-recorded as a named metric, not forwarded as a ref.
+recorded as a named metric when `<name>` matches ANX's metric grammar, and
+it is not forwarded as a ref.
 
 ## Event stream
 
@@ -227,16 +228,19 @@ line, optionally prefixed with `LOOP_RECEIPT `:
 `http` and `https` effect refs, and other typed refs such as `card:example`,
 are forwarded. A `metric:<name>` ref is not an effect ref: ANX accepts only
 http(s) effect refs, so a finite `metric_after` is recorded as the receipt
-metric `<name>` (for example `firestore.read_count.24h`). An explicit
-`metrics` entry with that name wins; otherwise the first finite value is
-kept. The goal metric name is reserved until selection succeeds, so an
-effect whose name equals `--goal-metric` does not publish that metric when
-the selected effect is absent or the row is ambiguous. An explicit `metrics`
-value for the goal name is still kept. Those metrics use the same bounds and
-order as any other receipt: at most 16, the goal metric first when it is
-present, then the rest by name. `--goal-metric` is filled from effects only
-by the `--goal-effect` rule above. `--started-at` is `run`. The run id keeps the original `run` string,
-so `Z` and `+00:00` stay distinct ids even though they are the same instant.
+metric `<name>` (for example `firestore.read_count.24h`) when `<name>`
+matches `^[a-z][a-z0-9_.-]{0,119}$`. A longer name, a space, or an uppercase
+letter is dropped and is not forwarded as a ref. An explicit `metrics` entry
+with that name wins; otherwise the first finite value is kept. The goal
+metric name is reserved until selection succeeds, so an effect whose name
+equals `--goal-metric` does not publish that metric when the selected effect
+is absent or the row is ambiguous. An explicit `metrics` value for the goal
+name is still kept. Those metrics use the same bounds and order as any other
+receipt: at most 16, the goal metric first when it is present, then the rest
+by name. `--goal-metric` is filled from effects only by the `--goal-effect`
+rule above. `--started-at` is `run`. The run id keeps the original `run`
+string, so `Z` and `+00:00` stay distinct ids even though they are the same
+instant.
 
 ## Manifest
 
