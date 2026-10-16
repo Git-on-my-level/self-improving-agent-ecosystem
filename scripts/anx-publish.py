@@ -69,12 +69,19 @@ INTERMEDIATE_EVENT_TYPES = frozenset({
 })
 
 # error follows scripts/avo-to-event.py: error -> candidate_failed -> measured/rejected.
+# rebaseline resets the incumbent score and carries no experiment decision.
 AVO_ACTIONS: dict[str, tuple[str, str | None]] = {
     "baseline": ("measured", None),
+    "rebaseline": ("measured", None),
     "accept": ("acted", "kept"),
     "reject": ("measured", "rejected"),
     "error": ("measured", "rejected"),
 }
+
+# Attempt lifecycle. Skipped unless the row alone carries that candidate's objective.
+INTERMEDIATE_AVO_ACTIONS = frozenset({"candidate", "verify", "budget"})
+# diff_hash values AVO writes for non-attempt rows.
+_AVO_PLACEHOLDER_DIFFS = frozenset({"", "none", "baseline", "rebaseline"})
 
 _DURATION_RE = re.compile(r"^[1-9][0-9]*[smhd]$")
 _ISO_TZ_FIX_RE = re.compile(r"([+-]\d{2})(\d{2})$")
@@ -403,12 +410,12 @@ def event_command(
     kind = event.get("type")
     if not isinstance(kind, str):
         raise PublishError(f"{where}: event type is missing")
+    if kind not in EVENT_OUTCOMES and kind not in INTERMEDIATE_EVENT_TYPES:
+        raise PublishError(f"{where}: unknown event type {kind}")
     event_id = event.get("event_id")
     if not isinstance(event_id, str) or not event_id.strip():
         raise PublishError(f"{where}: event_id is missing")
     intermediate = kind in INTERMEDIATE_EVENT_TYPES
-    if kind not in EVENT_OUTCOMES and not intermediate:
-        raise PublishError(f"{where}: unknown event type {kind}")
     candidate_id = event.get("candidate_id")
     carries_only = (
         intermediate
@@ -472,6 +479,46 @@ def avo_identity(row: dict[str, Any]) -> str:
     return "none"
 
 
+def avo_candidate_key(row: dict[str, Any]) -> str | None:
+    """Group AVO rows that belong to one attempt.
+
+    An attempt is ``tick`` plus a real ``diff_hash``. Placeholder hashes
+    (``baseline``, ``rebaseline``) are not attempts; those rows group by commit.
+    """
+    diff = row.get("diff_hash")
+    if isinstance(diff, str) and diff.strip() not in _AVO_PLACEHOLDER_DIFFS:
+        return f"{avo_tick_token(row)}:{diff.strip()}"
+    commit = row.get("commit")
+    if isinstance(commit, str) and commit.strip():
+        return f"commit:{commit.strip()}"
+    return None
+
+
+def avo_tick_token(row: dict[str, Any]) -> str:
+    tick = row.get("tick")
+    if isinstance(tick, bool) or not isinstance(tick, (int, float)) or (
+        isinstance(tick, float) and not tick.is_integer()
+    ):
+        return "na"
+    return str(int(tick))
+
+
+def sole_avo_objective_carriers(rows: list[dict[str, Any]]) -> set[str]:
+    """Attempt keys whose only numeric objective sits on a lifecycle row."""
+    non_intermediate: set[str] = set()
+    intermediate: set[str] = set()
+    for row in rows:
+        key = avo_candidate_key(row)
+        if key is None or not is_finite_number(row.get("objective")):
+            continue
+        action = row.get("action")
+        if action in INTERMEDIATE_AVO_ACTIONS:
+            intermediate.add(key)
+        elif action in AVO_ACTIONS:
+            non_intermediate.add(key)
+    return intermediate - non_intermediate
+
+
 def avo_tick(row: dict[str, Any], where: str) -> str:
     tick = row.get("tick")
     if tick is None:
@@ -490,12 +537,18 @@ def avo_command(
     goal_metric: str | None,
     loop: str | None,
     where: str,
-) -> list[str]:
+    sole_carriers: set[str],
+) -> list[str] | None:
     action = row.get("action")
-    if action not in AVO_ACTIONS:
-        known = ", ".join(sorted(AVO_ACTIONS))
-        raise PublishError(f"{where}: unsupported AVO action {action!r} (known: {known})")
-    outcome, decision = AVO_ACTIONS[action]
+    if action in INTERMEDIATE_AVO_ACTIONS:
+        key = avo_candidate_key(row)
+        if key is None or key not in sole_carriers or not is_finite_number(row.get("objective")):
+            return None
+        outcome, decision = "measured", None
+    elif action not in AVO_ACTIONS:
+        raise PublishError(f"{where}: unknown AVO action {action!r}")
+    else:
+        outcome, decision = AVO_ACTIONS[action]
     loop_id = row.get("loop")
     if isinstance(loop_id, str) and loop_id.strip():
         loop_name = loop_id.strip()
@@ -604,7 +657,7 @@ def classify(obj: dict[str, Any], hint: str | None) -> str:
     )
 
 
-def load_rows(path: pathlib.Path) -> list[tuple[int, str, dict[str, Any]]]:
+def load_rows(path: pathlib.Path, *, strict: bool) -> list[tuple[int, str, dict[str, Any]]]:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -614,6 +667,7 @@ def load_rows(path: pathlib.Path) -> list[tuple[int, str, dict[str, Any]]]:
         raw = line.strip()
         if not raw:
             continue
+        where = f"{path}:{lineno}"
         hint = None
         payload = raw
         if raw.startswith(RECEIPT_PREFIX):
@@ -622,15 +676,35 @@ def load_rows(path: pathlib.Path) -> list[tuple[int, str, dict[str, Any]]]:
         try:
             obj = json.loads(payload)
         except json.JSONDecodeError as exc:
-            raise PublishError(f"{path}:{lineno}: invalid JSON ({exc.msg})") from exc
+            if strict:
+                raise PublishError(f"{where}: invalid JSON ({exc.msg})") from exc
+            print(f"warning: {where}: skipping malformed JSON ({exc.msg})", file=sys.stderr)
+            continue
         if not isinstance(obj, dict):
-            raise PublishError(f"{path}:{lineno}: expected a JSON object")
+            if strict:
+                raise PublishError(f"{where}: expected a JSON object")
+            print(f"warning: {where}: skipping malformed JSON (expected an object)", file=sys.stderr)
+            continue
         try:
             kind = classify(obj, hint)
         except PublishError as exc:
-            raise PublishError(f"{path}:{lineno}: {exc}") from exc
+            raise PublishError(f"{where}: {exc}") from exc
         rows.append((lineno, kind, obj))
     return rows
+
+
+def _in_since_window(kind: str, obj: dict[str, Any], since: dt.datetime | None) -> bool:
+    if since is None:
+        return True
+    stamped = row_timestamp(kind, obj)
+    return stamped is None or stamped >= since
+
+
+def _skip_unknown(where: str, detail: str, *, strict: bool, visible: bool) -> None:
+    if strict:
+        raise PublishError(f"{where}: {detail}")
+    if visible:
+        print(f"warning: {where}: skipping {detail}", file=sys.stderr)
 
 
 def row_timestamp(kind: str, obj: dict[str, Any]) -> dt.datetime | None:
@@ -650,26 +724,43 @@ def build_receipt_commands(
     loop: str | None,
     anx: str,
     workspace: str | None,
+    strict: bool = False,
 ) -> list[list[str]]:
     if goal_metric is not None and not valid_metric_name(goal_metric):
         raise PublishError("--goal-metric must be a single-line name without '='")
     loaded: list[tuple[pathlib.Path, int, str, dict[str, Any]]] = []
     for path in paths:
-        for lineno, kind, obj in load_rows(path):
+        for lineno, kind, obj in load_rows(path, strict=strict):
             loaded.append((path, lineno, kind, obj))
     events = [obj for _, _, kind, obj in loaded if kind == "event"]
     sole = sole_objective_carriers(events)
+    avo_sole = sole_avo_objective_carriers([obj for _, _, kind, obj in loaded if kind == "avo"])
     commands: list[list[str]] = []
     undated = 0
     avo_without_metric = False
     for path, lineno, kind, obj in loaded:
         where = f"{path}:{lineno}"
+        visible = _in_since_window(kind, obj, since)
         if kind == "event":
+            event_type = obj.get("type")
+            if isinstance(event_type, str) and event_type not in EVENT_OUTCOMES and event_type not in INTERMEDIATE_EVENT_TYPES:
+                _skip_unknown(
+                    where, f"unknown event type {event_type}", strict=strict, visible=visible,
+                )
+                continue
             tail = event_command(
                 obj, card=card, goal_metric=goal_metric, sole_carriers=sole, where=where,
             )
         elif kind == "avo":
-            tail = avo_command(obj, card=card, goal_metric=goal_metric, loop=loop, where=where)
+            action = obj.get("action")
+            if action not in AVO_ACTIONS and action not in INTERMEDIATE_AVO_ACTIONS:
+                _skip_unknown(
+                    where, f"unknown AVO action {action!r}", strict=strict, visible=visible,
+                )
+                continue
+            tail = avo_command(
+                obj, card=card, goal_metric=goal_metric, loop=loop, where=where, sole_carriers=avo_sole,
+            )
         else:
             tail = loop_command(obj, card=card, goal_metric=goal_metric, where=where)
         if tail is None:
@@ -820,6 +911,11 @@ def build_parser() -> argparse.ArgumentParser:
     receipts.add_argument("--goal-metric", help="metric name for AVO objectives and receipt effects")
     receipts.add_argument("--since", help="include rows at or after this RFC3339 timestamp")
     receipts.add_argument("--loop", help="loop id used in AVO run ids when a row omits one")
+    receipts.add_argument(
+        "--strict",
+        action="store_true",
+        help="fail on an unknown action, an unknown event type, or a malformed JSON line",
+    )
 
     manifest = sub.add_parser("manifest", parents=[common], help="publish cadence and an optional goal")
     manifest.add_argument("--card", required=True, help="ANX card ref, for example card:example")
@@ -852,6 +948,7 @@ def main(argv: list[str] | None = None) -> int:
                 loop=args.loop,
                 anx=anx,
                 workspace=workspace,
+                strict=args.strict,
             )
         else:
             commands = build_manifest_commands(

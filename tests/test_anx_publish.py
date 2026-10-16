@@ -391,15 +391,111 @@ class AvoAndReceiptTests(unittest.TestCase):
             )[0]
         self.assertEqual(flags(command, "--metric"), ["samples=1"])
 
-    def test_unknown_avo_action_fails(self):
+    def test_lifecycle_fixture_maps_rebaseline_and_skips_attempt_rows(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            commands = anx.build_receipt_commands(
+                [FIXTURES / "avo-lifecycle.jsonl"],
+                card="card:x", goal_metric="latency_ms", since=None, loop="improve",
+                anx="anx", workspace=None,
+            )
+        found = by_run(commands)
+        rendered = json.dumps(commands)
+        self.assertNotIn("runs/", rendered)
+        self.assertNotIn("1111aaaa2222", rendered)
+        self.assertNotIn("avo:improve:5:c0ffee01:candidate", found)
+        self.assertNotIn("avo:improve:5:c0ffee01:verify", found)
+        self.assertNotIn("avo:improve:5:c0ffee01:budget", found)
+
+        accepted = found["avo:improve:5:abc123def456:accept"]
+        self.assertEqual(flag(accepted, "--outcome"), "acted")
+        self.assertEqual(flag(accepted, "--decision"), "kept")
+        self.assertEqual(flag(accepted, "--score-before"), "10")
+        self.assertEqual(flag(accepted, "--score-after"), "12")
+
+        lone = found["avo:improve:6:onlyhash01:candidate"]
+        self.assertEqual(flag(lone, "--outcome"), "measured")
+        self.assertIsNone(flag(lone, "--decision"))
+        self.assertNotIn("--candidate", lone)
+        self.assertEqual(flag(lone, "--metric"), "latency_ms=4")
+        self.assertEqual(flag(lone, "--summary"), "only score for this attempt")
+
+        reset = found["avo:improve:7:bbbbccccdddd:rebaseline"]
+        self.assertEqual(flag(reset, "--outcome"), "measured")
+        self.assertIsNone(flag(reset, "--decision"))
+        self.assertNotIn("--candidate", reset)
+        self.assertNotIn("--score-before", reset)
+        self.assertNotIn("--score-after", reset)
+        self.assertEqual(flags(reset, "--metric"), ["latency_ms=11", "samples=4"])
+        self.assertEqual(
+            flag(reset, "--summary"),
+            "evaluator eval-v1 -> eval-v2 (changed: score); previous best 10",
+        )
+
+        budget = found["avo:improve:9:budgetonly1:budget"]
+        self.assertEqual(flag(budget, "--outcome"), "measured")
+        self.assertEqual(flag(budget, "--metric"), "latency_ms=3")
+        self.assertEqual(flag(budget, "--summary"), "only budget sample")
+        verify = found["avo:improve:10:verifyonly1:verify"]
+        self.assertEqual(flag(verify, "--outcome"), "measured")
+        self.assertEqual(flag(verify, "--metric"), "latency_ms=6")
+        self.assertEqual(flag(verify, "--summary"), "only verification score")
+
+        warning = stderr.getvalue()
+        self.assertIn("avo-lifecycle.jsonl:6", warning)
+        self.assertIn("unknown AVO action 'reflect'", warning)
+        self.assertEqual(warning.count("warning:"), 1)
+
+    def test_unknown_action_and_event_skip_unless_strict(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = pathlib.Path(tmp) / "odd.jsonl"
-            write_jsonl(path, [{"tick": 1, "action": "frobnicate", "note": "no"}])
+            root = pathlib.Path(tmp)
+            ledger = root / "odd.jsonl"
+            write_jsonl(ledger, [
+                {"tick": 1, "action": "reflect", "note": "old", "ts": "2026-01-01T00:00:00Z"},
+                {"tick": 2, "action": "frobnicate", "note": "later", "ts": "2026-06-01T00:00:00Z"},
+                {
+                    "tick": 3, "action": "accept", "objective": 2, "delta": 1, "commit": "abc",
+                    "note": "kept", "ts": "2026-06-01T01:00:00Z",
+                },
+            ])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                commands = anx.build_receipt_commands(
+                    [ledger], card="card:x", goal_metric="score", since=anx.parse_since("2026-04-01T00:00:00Z"),
+                    loop="improve", anx="anx", workspace=None,
+                )
+            self.assertEqual(list(by_run(commands)), ["avo:improve:3:abc:accept"])
+            warning = stderr.getvalue()
+            self.assertIn("odd.jsonl:2", warning)
+            self.assertIn("unknown AVO action 'frobnicate'", warning)
+            self.assertNotIn("reflect", warning)
             with self.assertRaises(anx.PublishError) as caught:
                 anx.build_receipt_commands(
-                    [path], card="card:x", goal_metric=None, since=None, loop=None, anx="anx", workspace=None,
+                    [ledger], card="card:x", goal_metric=None, since=None, loop=None,
+                    anx="anx", workspace=None, strict=True,
                 )
-        self.assertIn("frobnicate", str(caught.exception))
+            self.assertIn("odd.jsonl:1", str(caught.exception))
+            self.assertIn("reflect", str(caught.exception))
+
+            events = root / "events.jsonl"
+            write_jsonl(events, [
+                minimal_event("event-widget", "widget_spun"),
+                minimal_event("event-quiet", "no_action"),
+            ])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                commands = anx.build_receipt_commands(
+                    [events], card="card:x", goal_metric=None, since=None, loop=None,
+                    anx="anx", workspace=None,
+                )
+            self.assertEqual(list(by_run(commands)), ["event-quiet"])
+            self.assertIn("unknown event type widget_spun", stderr.getvalue())
+            with self.assertRaises(anx.PublishError) as caught:
+                anx.build_receipt_commands(
+                    [events], card="card:x", goal_metric=None, since=None, loop=None,
+                    anx="anx", workspace=None, strict=True,
+                )
+            self.assertIn("widget_spun", str(caught.exception))
 
 
 class ManifestTests(unittest.TestCase):
@@ -631,23 +727,49 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 3)
             self.assertEqual(log.read_text().splitlines(), ["work"])
 
-    def test_invalid_input_does_not_execute(self):
+    def test_malformed_json_skips_and_strict_does_not_execute(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             marker = root / "executed"
+            log = root / "argv.jsonl"
             binary = root / "anx"
-            binary.write_text("#!/bin/sh\n" + f"touch {marker}\n")
+            binary.write_text(textwrap.dedent(f"""\
+                #!/usr/bin/env python3
+                import json, pathlib, sys
+                pathlib.Path({str(log)!r}).open("a").write(json.dumps(sys.argv) + "\\n")
+                pathlib.Path({str(marker)!r}).touch()
+                """))
             binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
             ledger = root / "bad.jsonl"
-            ledger.write_text("{not json\n")
+            kept = {
+                "tick": 1, "action": "accept", "objective": 2, "delta": 1,
+                "commit": "abc", "note": "kept going", "ts": "2026-04-02T00:00:00Z",
+            }
+            ledger.write_text(json.dumps(kept) + "\n{not json\n" + json.dumps(dict(kept, tick=2, commit="def")) + "\n")
             result = self.run_cli(
                 "receipts", "--card", "card:x", "--input", str(ledger),
+                "--loop", "improve", "--goal-metric", "score",
                 "--anx", str(binary), "--apply",
             )
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("invalid JSON", result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("bad.jsonl:2", result.stderr)
+            self.assertIn("malformed JSON", result.stderr)
+            recorded = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(
+                [flag(command, "--run-id") for command in recorded],
+                ["avo:improve:1:abc:accept", "avo:improve:2:def:accept"],
+            )
+            log.unlink()
+            marker.unlink()
+            strict = self.run_cli(
+                "receipts", "--card", "card:x", "--input", str(ledger),
+                "--anx", str(binary), "--apply", "--strict",
+            )
+            self.assertEqual(strict.returncode, 2)
+            self.assertIn("invalid JSON", strict.stderr)
+            self.assertEqual(strict.stdout, "")
             self.assertFalse(marker.exists())
-            self.assertEqual(result.stdout, "")
+            self.assertFalse(log.exists())
 
     def test_since_cli_and_repeated_dry_run(self):
         args = [
@@ -697,6 +819,11 @@ class CliTests(unittest.TestCase):
         self.assertIn("kept", doc)
         self.assertIn("reverted", doc)
         self.assertIn("anx-publish.py receipts --card card:x --input ledger.jsonl --since", doc)
+        self.assertIn("`rebaseline`", doc)
+        self.assertIn("`candidate`", doc)
+        self.assertIn("`verify`", doc)
+        self.assertIn("`budget`", doc)
+        self.assertIn("--strict", doc)
         self.assertIn("idempoten", doc.lower())
         readme = (ROOT / "README.md").read_text()
         guide = (ROOT / "docs" / "adoption-guide.md").read_text()

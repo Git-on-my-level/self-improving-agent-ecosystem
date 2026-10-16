@@ -39,6 +39,8 @@ Other flags:
   The default segment is `avo`.
 - `--workspace <alias>` — passed through as `anx --workspace <alias> ...`.
 - `--anx <path>` — ANX binary. The default is `anx` on `PATH`.
+- `--strict` — fail the run on an unknown action, an unknown event type, or a
+  malformed JSON line. The default warns and continues.
 
 `--input` may be repeated. Each non-empty line is one record. A loop receipt
 line may be prefixed with `LOOP_RECEIPT `.
@@ -112,7 +114,8 @@ experiment decision, only when it has a numeric `result.objective`, a
 `candidate_id`, and no non-intermediate event for that same candidate in the
 same invocation also has a numeric objective. That keeps a lone score on the
 hill-climb chart. `--since` filters what is emitted; it does not change which
-event carries the objective.
+event carries the objective. An event type outside this table is skipped with
+one warning (`file:line` and the type). `--strict` fails the run instead.
 
 When a decision is present and `result.objective` is numeric, the receipt
 includes `--score-after`. Events do not carry a delta, so they do not set
@@ -135,20 +138,42 @@ one `scripts/avo-to-event.py` already consumes: `action`, `objective`,
 | Action | Outcome | Decision | Scores |
 | --- | --- | --- | --- |
 | `baseline` | measured | — | goal metric = objective |
+| `rebaseline` | measured | — | goal metric = objective; summary is the note. Resets the incumbent and carries no experiment decision |
 | `accept` | acted | kept | score-before = objective − delta, score-after = objective, goal metric = objective |
 | `reject` | measured | rejected | goal metric = objective |
 | `error` | measured | rejected | same outcome as `candidate_failed`; goal metric when objective is present |
+| `candidate` | skipped | lifecycle | published as measured only when it alone carries the attempt's objective |
+| `verify` | skipped | lifecycle | same rule as `candidate` |
+| `budget` | skipped | lifecycle | same rule as `candidate` |
 
 `error` follows the event bridge (`error` → `candidate_failed` → measured /
 rejected) so a ledger and the events derived from it publish the same
 decision. Baseline rows are published even when `tick` is 0. The event bridge
-skips them because they are not terminal candidate events. Other numeric
+skips them because they are not terminal candidate events. `rebaseline` is the
+explicit rescore of the current best after an evaluator change. Other numeric
 `metrics` are forwarded. When `--goal-metric` names a key that is also in
 `metrics`, the objective wins. Without `--goal-metric` the outcome is still
-published and a warning names the missing metric. Unknown actions fail the
-run instead of being guessed.
+published and a warning names the missing metric.
 
-The candidate is the commit, otherwise the diff hash. `--started-at` is `ts`.
+`candidate`, `verify`, and `budget` are lifecycle rows for one attempt, the
+same kind of marker as `candidate_started` and `candidate_built`. A row is
+published as `measured`, with no experiment decision, only when it has a
+numeric `objective` and no `baseline`, `rebaseline`, `accept`, `reject`, or
+`error` row for that same candidate also has a numeric objective. The
+candidate key is `tick` plus `diff_hash`. The placeholder hashes `baseline`
+and `rebaseline` are not attempt ids; those rows group by `commit`. A
+lifecycle row with neither a patch hash nor a commit stays skipped.
+
+Any other action (`reflect`, `preview`, `stalled`, `supervisor_error`, and
+anything new) is skipped. Stderr gets one warning line with `file:line` and
+the action, and the rest of the file is still published. A malformed JSON
+line is skipped the same way. `--strict` restores fail-fast for all three.
+`--since` still bounds which warnings are printed: a mapped or unmapped row
+older than the watermark is silent. A line that is not JSON has no timestamp,
+so it always warns.
+
+The experiment candidate is the commit, otherwise the diff hash.
+`--started-at` is `ts`. Ledger fields such as `run_dir` are not forwarded.
 
 ## Loop receipts
 
