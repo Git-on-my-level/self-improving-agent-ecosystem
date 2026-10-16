@@ -827,7 +827,14 @@ def loop_command(
         name = metric_ref_name(ref)
         if isinstance(ref, str) and ref.startswith(METRIC_REF_PREFIX):
             # ANX drops non-http(s) effect refs. Keep the measurement as a metric.
-            if name is not None and finite is not None and name not in metrics:
+            # Reserve the goal key until selection succeeds. An explicit row
+            # metric of that name is already in ``metrics`` and stays.
+            reserved_goal = (
+                goal_metric is not None
+                and name == goal_metric
+                and name not in explicit_metrics
+            )
+            if name is not None and finite is not None and name not in metrics and not reserved_goal:
                 metrics[name] = finite
         else:
             kept = safe_ref(ref)

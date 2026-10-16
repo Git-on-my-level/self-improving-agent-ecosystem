@@ -47,7 +47,8 @@ Other flags:
   finite `metric_after`. When several do, the goal metric stays unset and the
   process warns once on stderr, not once per row, to pass `--goal-effect`.
   Requires `--goal-metric`. An explicit `metrics` value for the goal name is
-  kept.
+  kept. A `metric:<name>` effect whose name equals `--goal-metric` does not
+  fill that key: it stays unset until selection succeeds.
 - `--loop <id>` — loop id used in AVO run ids when the row does not carry one.
   The default segment is `avo`.
 - `--workspace <alias>` — passed through as `anx --workspace <alias> ...`.
@@ -228,10 +229,13 @@ are forwarded. A `metric:<name>` ref is not an effect ref: ANX accepts only
 http(s) effect refs, so a finite `metric_after` is recorded as the receipt
 metric `<name>` (for example `firestore.read_count.24h`). An explicit
 `metrics` entry with that name wins; otherwise the first finite value is
-kept. Those metrics use the same bounds and order as any other receipt: at
-most 16, the goal metric first when it is present, then the rest by name.
-`--goal-metric` is filled from effects only by the `--goal-effect` rule
-above. `--started-at` is `run`. The run id keeps the original `run` string,
+kept. The goal metric name is reserved until selection succeeds, so an
+effect whose name equals `--goal-metric` does not publish that metric when
+the selected effect is absent or the row is ambiguous. An explicit `metrics`
+value for the goal name is still kept. Those metrics use the same bounds and
+order as any other receipt: at most 16, the goal metric first when it is
+present, then the rest by name. `--goal-metric` is filled from effects only
+by the `--goal-effect` rule above. `--started-at` is `run`. The run id keeps the original `run` string,
 so `Z` and `+00:00` stay distinct ids even though they are the same instant.
 
 ## Manifest

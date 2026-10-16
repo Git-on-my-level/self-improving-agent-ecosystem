@@ -551,6 +551,97 @@ class AvoAndReceiptTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("--goal-metric", missing.getvalue())
 
+    def test_same_named_effect_does_not_bypass_goal_selection(self):
+        """A metric: effect that shares the goal name is not the goal metric.
+
+        Selection has to succeed. An explicit row metric of that name is kept.
+        """
+        effects = [
+            {"ref": "metric:reads_24h", "metric_before": 806924584, "metric_after": 762431713},
+            {"ref": "metric:hourly", "metric_before": 32287839, "metric_after": 32425550},
+        ]
+
+        def receipt(run, metrics=None):
+            row = {
+                "loop": "example-watch",
+                "run": run,
+                "outcome": "measured",
+                "note": "collision",
+                "effects": effects,
+            }
+            if metrics is not None:
+                row["metrics"] = metrics
+            return "LOOP_RECEIPT " + json.dumps(row)
+
+        def publish(lines, goal_effect=None):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = pathlib.Path(tmp) / "collision.jsonl"
+                path.write_text("".join(line + "\n" for line in lines))
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    commands = anx.build_receipt_commands(
+                        [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                        anx="anx", workspace=None, goal_effect=goal_effect,
+                    )
+            return commands, stderr.getvalue()
+
+        missing, missing_err = publish(
+            [receipt("2026-04-02T00:00:00Z"), receipt("2026-04-02T01:00:00Z")],
+            goal_effect="metric:missing",
+        )
+        self.assertEqual(missing_err, "")
+        for command in missing:
+            self.assertEqual(flags(command, "--metric"), ["hourly=32425550"])
+            self.assertNotIn("reads_24h", json.dumps(command))
+            self.assertNotIn("762431713", json.dumps(command))
+
+        ambiguous, ambiguous_err = publish(
+            [receipt("2026-04-02T00:00:00Z"), receipt("2026-04-02T01:00:00Z")],
+        )
+        self.assertEqual(ambiguous_err.count(anx.AMBIGUOUS_EFFECT_WARNING), 1)
+        self.assertEqual(ambiguous_err.count("\n"), 1)
+        for command in ambiguous:
+            self.assertEqual(flags(command, "--metric"), ["hourly=32425550"])
+            self.assertNotIn("reads_24h", json.dumps(command))
+
+        chosen, chosen_err = publish(
+            [receipt("2026-04-02T00:00:00Z")],
+            goal_effect="metric:reads_24h",
+        )
+        self.assertEqual(chosen_err, "")
+        self.assertEqual(flags(chosen[0], "--metric"), [
+            "reads_24h=762431713",
+            "hourly=32425550",
+        ])
+
+        other, other_err = publish(
+            [receipt("2026-04-02T00:00:00Z")],
+            goal_effect="metric:hourly",
+        )
+        self.assertEqual(other_err, "")
+        self.assertEqual(flags(other[0], "--metric"), [
+            "reads_24h=32425550",
+            "hourly=32425550",
+        ])
+        self.assertNotIn("762431713", json.dumps(other[0]))
+
+        explicit, explicit_err = publish(
+            [receipt("2026-04-02T00:00:00Z", metrics={"reads_24h": 111})],
+            goal_effect="metric:missing",
+        )
+        self.assertEqual(explicit_err, "")
+        self.assertEqual(flags(explicit[0], "--metric"), [
+            "reads_24h=111",
+            "hourly=32425550",
+        ])
+
+        explicit_ambiguous, explicit_ambiguous_err = publish(
+            [receipt("2026-04-02T00:00:00Z", metrics={"reads_24h": 111})],
+        )
+        self.assertEqual(explicit_ambiguous_err, "")
+        self.assertEqual(flags(explicit_ambiguous[0], "--metric")[0], "reads_24h=111")
+        self.assertNotIn("762431713", json.dumps(explicit_ambiguous[0]))
+
     def test_summary_truncation_counts_characters(self):
         reason = "é" * 281
         row = minimal_event("event-unicode", "no_action", result={"status": "no_action", "reason": reason})
