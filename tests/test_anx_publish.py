@@ -350,6 +350,336 @@ class AvoAndReceiptTests(unittest.TestCase):
         self.assertEqual(flag(broken, "--summary"), "E" * 280)
         self.assertEqual(flag(broken, "--started-at"), "2026-04-02T02:00:00Z")
 
+    def test_goal_effect_picks_the_matching_metric_after(self):
+        effects = [
+            {
+                "ref": "metric:firestore.read_count.24h",
+                "metric_before": 806924584,
+                "metric_after": 762431713,
+            },
+            {
+                "ref": "metric:firestore.read_count.per_hour_fast",
+                "metric_before": 32287839,
+                "metric_after": 32425550,
+            },
+        ]
+        matched = {
+            "loop": "example-watch",
+            "run": "2026-04-02T00:00:00Z",
+            "outcome": "measured",
+            "note": "reads",
+            "metrics": {"samples": 12},
+            "effects": effects,
+        }
+        absent = {
+            "loop": "example-watch",
+            "run": "2026-04-02T01:00:00Z",
+            "outcome": "measured",
+            "note": "other series only",
+            "effects": [effects[1]],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "firestore.jsonl"
+            write_jsonl(path, [matched, absent])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                commands = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                    anx="anx", workspace=None, goal_effect="metric:firestore.read_count.24h",
+                )
+        self.assertEqual(stderr.getvalue(), "")
+        found = by_run(commands)
+        chosen = found["example-watch:2026-04-02T00:00:00Z"]
+        self.assertEqual(flags(chosen, "--metric"), [
+            "reads_24h=762431713",
+            "firestore.read_count.24h=762431713",
+            "firestore.read_count.per_hour_fast=32425550",
+            "samples=12",
+        ])
+        self.assertEqual(flags(chosen, "--ref"), [])
+        self.assertNotIn("metric:firestore", json.dumps(chosen))
+        missed = found["example-watch:2026-04-02T01:00:00Z"]
+        self.assertEqual(flags(missed, "--metric"), ["firestore.read_count.per_hour_fast=32425550"])
+        self.assertNotIn("reads_24h", json.dumps(missed))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "firestore.jsonl"
+            write_jsonl(path, [matched])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                per_hour = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                    anx="anx", workspace=None,
+                    goal_effect="metric:firestore.read_count.per_hour_fast",
+                )[0]
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(flags(per_hour, "--metric")[0], "reads_24h=32425550")
+
+    def test_several_effects_do_not_guess_the_goal_metric(self):
+        effects = [
+            {
+                "ref": "metric:firestore.read_count.24h",
+                "metric_before": 806924584,
+                "metric_after": 762431713,
+            },
+            {
+                "ref": "metric:firestore.read_count.per_hour_fast",
+                "metric_before": 32287839,
+                "metric_after": 32425550,
+            },
+        ]
+        rows = [
+            {
+                "loop": "example-watch",
+                "run": f"2026-04-02T0{index}:00:00Z",
+                "outcome": "measured",
+                "note": "reads",
+                "metrics": {"samples": 12},
+                "effects": effects,
+            }
+            for index in (0, 1)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "firestore.jsonl"
+            write_jsonl(path, rows)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                commands = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                    anx="anx", workspace=None,
+                )
+        warning = stderr.getvalue()
+        self.assertEqual(warning.count(anx.AMBIGUOUS_EFFECT_WARNING), 1)
+        self.assertIn("--goal-effect", warning)
+        self.assertEqual(warning.count("\n"), 1)
+        for command in commands:
+            self.assertEqual(flags(command, "--metric"), [
+                "firestore.read_count.24h=762431713",
+                "firestore.read_count.per_hour_fast=32425550",
+                "samples=12",
+            ])
+            self.assertNotIn("reads_24h", json.dumps(command))
+            self.assertEqual(flags(command, "--ref"), [])
+
+    def test_single_effect_sets_the_goal_metric(self):
+        row = {
+            "loop": "example-watch",
+            "run": "2026-04-02T00:00:00Z",
+            "outcome": "measured",
+            "note": "one series",
+            "effects": [
+                {
+                    "ref": "metric:firestore.read_count.24h",
+                    "metric_before": 806924584,
+                    "metric_after": 762431713,
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "one.jsonl"
+            write_jsonl(path, [row])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                command = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                    anx="anx", workspace=None,
+                )[0]
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(flags(command, "--metric"), [
+            "reads_24h=762431713",
+            "firestore.read_count.24h=762431713",
+        ])
+        self.assertEqual(flags(command, "--ref"), [])
+
+    def test_metric_ref_becomes_a_named_metric(self):
+        row = {
+            "loop": "example-watch",
+            "run": "2026-04-02T00:00:00Z",
+            "outcome": "acted",
+            "note": "mixed refs",
+            "effects": [
+                {"ref": "https://example.com/pr/1", "metric_before": 10, "metric_after": 12},
+                {
+                    "ref": "metric:firestore.read_count.24h",
+                    "metric_before": 806924584,
+                    "metric_after": 762431713,
+                },
+                {"ref": "card:example"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "mixed.jsonl"
+            write_jsonl(path, [row])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                command = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                    anx="anx", workspace=None,
+                    goal_effect="metric:firestore.read_count.24h",
+                )[0]
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(flags(command, "--ref"), ["https://example.com/pr/1", "card:example"])
+        self.assertEqual(flags(command, "--metric"), [
+            "reads_24h=762431713",
+            "firestore.read_count.24h=762431713",
+        ])
+        self.assertNotIn("metric:firestore.read_count.24h", json.dumps(command))
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "mixed.jsonl"
+            write_jsonl(path, [row])
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = anx.main([
+                    "receipts", "--card", "card:x", "--input", str(path),
+                    "--goal-metric", "reads_24h",
+                    "--goal-effect", "metric:firestore.read_count.24h",
+                ])
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertEqual(stderr.getvalue(), "")
+            cli = json.loads(stdout.getvalue())
+            self.assertEqual(flags(cli, "--metric")[0], "reads_24h=762431713")
+            self.assertEqual(flags(cli, "--ref"), ["https://example.com/pr/1", "card:example"])
+
+            missing = io.StringIO()
+            with contextlib.redirect_stderr(missing):
+                code = anx.main([
+                    "receipts", "--card", "card:x", "--input", str(path),
+                    "--goal-effect", "metric:firestore.read_count.24h",
+                ])
+            self.assertEqual(code, 2)
+            self.assertIn("--goal-metric", missing.getvalue())
+
+    def test_same_named_effect_does_not_bypass_goal_selection(self):
+        """A metric: effect that shares the goal name is not the goal metric.
+
+        Selection has to succeed. An explicit row metric of that name is kept.
+        """
+        effects = [
+            {"ref": "metric:reads_24h", "metric_before": 806924584, "metric_after": 762431713},
+            {"ref": "metric:hourly", "metric_before": 32287839, "metric_after": 32425550},
+        ]
+
+        def receipt(run, metrics=None):
+            row = {
+                "loop": "example-watch",
+                "run": run,
+                "outcome": "measured",
+                "note": "collision",
+                "effects": effects,
+            }
+            if metrics is not None:
+                row["metrics"] = metrics
+            return "LOOP_RECEIPT " + json.dumps(row)
+
+        def publish(lines, goal_effect=None):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = pathlib.Path(tmp) / "collision.jsonl"
+                path.write_text("".join(line + "\n" for line in lines))
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    commands = anx.build_receipt_commands(
+                        [path], card="card:x", goal_metric="reads_24h", since=None, loop=None,
+                        anx="anx", workspace=None, goal_effect=goal_effect,
+                    )
+            return commands, stderr.getvalue()
+
+        missing, missing_err = publish(
+            [receipt("2026-04-02T00:00:00Z"), receipt("2026-04-02T01:00:00Z")],
+            goal_effect="metric:missing",
+        )
+        self.assertEqual(missing_err, "")
+        for command in missing:
+            self.assertEqual(flags(command, "--metric"), ["hourly=32425550"])
+            self.assertNotIn("reads_24h", json.dumps(command))
+            self.assertNotIn("762431713", json.dumps(command))
+
+        ambiguous, ambiguous_err = publish(
+            [receipt("2026-04-02T00:00:00Z"), receipt("2026-04-02T01:00:00Z")],
+        )
+        self.assertEqual(ambiguous_err.count(anx.AMBIGUOUS_EFFECT_WARNING), 1)
+        self.assertEqual(ambiguous_err.count("\n"), 1)
+        for command in ambiguous:
+            self.assertEqual(flags(command, "--metric"), ["hourly=32425550"])
+            self.assertNotIn("reads_24h", json.dumps(command))
+
+        chosen, chosen_err = publish(
+            [receipt("2026-04-02T00:00:00Z")],
+            goal_effect="metric:reads_24h",
+        )
+        self.assertEqual(chosen_err, "")
+        self.assertEqual(flags(chosen[0], "--metric"), [
+            "reads_24h=762431713",
+            "hourly=32425550",
+        ])
+
+        other, other_err = publish(
+            [receipt("2026-04-02T00:00:00Z")],
+            goal_effect="metric:hourly",
+        )
+        self.assertEqual(other_err, "")
+        self.assertEqual(flags(other[0], "--metric"), [
+            "reads_24h=32425550",
+            "hourly=32425550",
+        ])
+        self.assertNotIn("762431713", json.dumps(other[0]))
+
+        explicit, explicit_err = publish(
+            [receipt("2026-04-02T00:00:00Z", metrics={"reads_24h": 111})],
+            goal_effect="metric:missing",
+        )
+        self.assertEqual(explicit_err, "")
+        self.assertEqual(flags(explicit[0], "--metric"), [
+            "reads_24h=111",
+            "hourly=32425550",
+        ])
+
+        explicit_ambiguous, explicit_ambiguous_err = publish(
+            [receipt("2026-04-02T00:00:00Z", metrics={"reads_24h": 111})],
+        )
+        self.assertEqual(explicit_ambiguous_err, "")
+        self.assertEqual(flags(explicit_ambiguous[0], "--metric")[0], "reads_24h=111")
+        self.assertNotIn("762431713", json.dumps(explicit_ambiguous[0]))
+
+    def test_effect_metric_names_follow_anx_grammar(self):
+        accepted = "a" * 120
+        too_long = "a" * 121
+        self.assertEqual(len(accepted), 120)
+        self.assertEqual(len(too_long), 121)
+        self.assertEqual(anx.metric_ref_name("metric:" + accepted), accepted)
+        self.assertIsNone(anx.metric_ref_name("metric:" + too_long))
+        self.assertIsNone(anx.metric_ref_name("metric:latency ms"))
+        self.assertIsNone(anx.metric_ref_name("metric:Reads"))
+        row = {
+            "loop": "example-watch",
+            "run": "2026-04-02T00:00:00Z",
+            "outcome": "measured",
+            "note": "names",
+            "effects": [
+                {"ref": "metric:" + accepted, "metric_after": 1},
+                {"ref": "metric:" + too_long, "metric_after": 2},
+                {"ref": "metric:latency ms", "metric_after": 3},
+                {"ref": "metric:Reads", "metric_after": 4},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "names.jsonl"
+            path.write_text("LOOP_RECEIPT " + json.dumps(row) + "\n")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                command = anx.build_receipt_commands(
+                    [path], card="card:x", goal_metric=None, since=None, loop=None,
+                    anx="anx", workspace=None,
+                )[0]
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(flags(command, "--metric"), [f"{accepted}=1"])
+        self.assertEqual(flags(command, "--ref"), [])
+        rendered = json.dumps(command)
+        self.assertNotIn(too_long, rendered)
+        self.assertNotIn("latency ms", rendered)
+        self.assertNotIn("Reads", rendered)
+
     def test_summary_truncation_counts_characters(self):
         reason = "é" * 281
         row = minimal_event("event-unicode", "no_action", result={"status": "no_action", "reason": reason})
