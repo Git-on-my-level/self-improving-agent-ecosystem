@@ -253,7 +253,8 @@ class TickOutcomeTests(unittest.TestCase):
         rows = self.ledger_lines()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["outcome"], "acted")
-        self.assertIn("PATH=", proc.stderr)
+        # PATH is debug-only (LOOP_TICK_DEBUG). A normal tick must not page it.
+        self.assertNotIn("PATH=", proc.stderr)
         self.assertIn("doing work", proc.stdout, "child stdout must be forwarded verbatim")
         self.assertIn(loop.RECEIPT_PREFIX, proc.stdout)
 
@@ -473,7 +474,7 @@ class TickOutcomeTests(unittest.TestCase):
         proc = run_loop("tick", str(path), "--", *cmd)
         self.assertEqual(proc.returncode, loop.EXIT_MISSING_BIN)
         self.assertIn("preflight FAILED", proc.stderr)
-        self.assertIn("PATH=", proc.stderr)
+        self.assertNotIn("PATH=", proc.stderr)
         self.assertFalse((self.dir / "side_effect.txt").exists())
         rows = self.ledger_lines()
         self.assertEqual(rows[0]["outcome"], "infra_error")
@@ -1166,6 +1167,94 @@ class RetiredLoopTests(unittest.TestCase):
         proc = run_loop("validate", str(write_manifest(self.dir, retired="yes")))
         self.assertEqual(proc.returncode, 1)
         self.assertIn("retired: must be a boolean", proc.stderr)
+
+
+class GoalFieldTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.ledger = self.dir / "ledger" / "receipts.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, rows):
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        self.ledger.write_text("".join(loop.RECEIPT_PREFIX + json.dumps(row) + "\n" for row in rows))
+
+    def test_status_reports_latest_goal_and_newest_receipt_notes(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        older = (now - dt.timedelta(days=9)).isoformat(timespec="seconds")
+        week = (now - dt.timedelta(days=7, hours=1)).isoformat(timespec="seconds")
+        recent = (now - dt.timedelta(days=1)).isoformat(timespec="seconds")
+        newest = now.isoformat(timespec="seconds")
+        self._write([
+            receipt(run=older, outcome="measured", goal_value=10, reason="old"),
+            receipt(run=week, outcome="measured", goal_value=8),
+            receipt(run=recent, outcome="measured", goal_value=4, reason="not newest"),
+            receipt(run=newest, outcome="no_op", reason="queue empty", waiting_on="PR https://github.com/example/repo/pull/9 review"),
+        ])
+        # Pin "now" by calling the helper directly, then confirm status carries the fields.
+        fields = loop.goal_fields(loop.read_ledger(self.ledger)[0], now)
+        self.assertEqual(fields["goal_value"], 4)
+        self.assertEqual(fields["goal_value_7d_ago"], 8)
+        self.assertEqual(fields["last_reason"], "queue empty")
+        self.assertIn("pull/9", fields["waiting_on"])
+        manifest = write_manifest(self.dir, goal_unit="minutes", goal_direction="down", ledger=str(self.ledger))
+        proc = run_loop("status", str(manifest))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        record = json.loads(proc.stdout.strip().splitlines()[0])
+        self.assertEqual(record["goal_value"], 4)
+        self.assertEqual(record["goal_value_7d_ago"], 8)
+        self.assertEqual(record["last_reason"], "queue empty")
+        self.assertEqual(record["waiting_on"], fields["waiting_on"])
+        self.assertEqual(record["last_outcome"], "no_op")
+        self.assertFalse(record["stalled"] is None)
+
+    def test_status_nulls_when_no_receipt_carried_a_goal(self):
+        self._write([receipt(outcome="no_op")])
+        manifest = write_manifest(self.dir, ledger=str(self.ledger))
+        proc = run_loop("status", str(manifest))
+        record = json.loads(proc.stdout.strip().splitlines()[0])
+        self.assertIsNone(record["goal_value"])
+        self.assertIsNone(record["goal_value_at"])
+        self.assertIsNone(record["goal_value_7d_ago"])
+        self.assertIsNone(record["last_reason"])
+        self.assertIsNone(record["waiting_on"])
+        self.assertEqual(record["effects_7d"], 0)
+
+    def test_validate_rejects_non_numeric_goal_and_overlong_notes(self):
+        bad_value = self.dir / "bad-value.json"
+        bad_value.write_text(json.dumps(receipt(goal_value="12")))
+        proc = run_loop("validate", str(bad_value))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("goal_value must be a finite number", proc.stderr)
+        parsed, problem = loop.validate_receipt(json.dumps(receipt(goal_value=True)))
+        self.assertIsNone(parsed)
+        self.assertIn("goal_value", problem)
+        long_reason = self.dir / "long-reason.json"
+        long_reason.write_text(json.dumps(receipt(reason="x" * 201)))
+        proc = run_loop("validate", str(long_reason))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("reason must be at most 200", proc.stderr)
+        parsed, problem = loop.validate_receipt(json.dumps(receipt(waiting_on="y" * 201)))
+        self.assertIsNone(parsed)
+        self.assertIn("waiting_on", problem)
+        ok = self.dir / "ok-receipt.json"
+        ok.write_text(json.dumps(receipt(goal_value=1.5, reason="x" * 200, waiting_on="queue empty")))
+        proc = run_loop("validate", str(ok))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("ok", proc.stdout)
+
+    def test_validate_rejects_bad_goal_direction(self):
+        proc = run_loop("validate", str(write_manifest(self.dir, goal_direction="sideways")))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("goal_direction: must be up or down", proc.stderr)
+        proc = run_loop("validate", str(write_manifest(self.dir, goal_unit="  ", goal_direction="up")))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("goal_unit", proc.stderr)
+        proc = run_loop("validate", str(write_manifest(self.dir, goal_unit="GiB", goal_direction="down")))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
 if __name__ == "__main__":
