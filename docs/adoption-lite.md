@@ -30,6 +30,23 @@ Every loop proves its effect with three things:
    Optional on any receipt: `"metrics": {"<name>": <number>}`. Watch loops
    with a `health` SLO are judged on the named metric, not on `effects`.
 
+   Optional on any receipt, and only when this tick actually measured them:
+
+   - `goal_value` (finite number) — the goal metric in the manifest's
+     `goal_unit`. Do not copy an older measurement forward. A boolean, a
+     string, or a non-finite number makes the receipt invalid.
+   - `reason` (string, at most 200 characters, no secrets) — what broke or
+     why nothing happened. Expected on `infra_error` and `no_op` rows.
+   - `waiting_on` (string, at most 200 characters) — a human or another task
+     blocking the loop, such as `anx ask event:ev_...` or a pull-request URL.
+
+   `loop validate` on a receipt file rejects a non-numeric `goal_value` and
+   an over-long `reason` or `waiting_on`. `loop status` reports `goal_value`
+   and `goal_value_at` from the latest receipt that carried one,
+   `goal_value_7d_ago` (the newest such value at least 7 days old, otherwise
+   null), and `last_reason` plus `waiting_on` from the newest receipt (null
+   when that receipt omits them).
+
    Optional on any receipt: `"invalidates_effects":[{"run":"<iso8601>","ref":"<url>"}]`.
    Each entry is an object with a string `run` and a string `ref`. A null
    list, a null entry, or a non-string ref makes the whole receipt invalid.
@@ -72,6 +89,8 @@ The manifest carries the declarations; `scripts/loop` enforces the mechanics.
   "host": "workstation-1",
   "archetype": "maintain",
   "goal_metric": "median time from alert to resolved",
+  "goal_unit": "minutes",
+  "goal_direction": "down",
   "authority": "pr",
   "ledger": "~/.hermes/state/loops/example-watch/receipts.jsonl",
   "effect_probe": "re-run the alert-age query after each merge; deltas go in effects",
@@ -83,7 +102,8 @@ The manifest carries the declarations; `scripts/loop` enforces the mechanics.
 ```
 
 Fields: `archetype` (`optimize | maintain | observe_propose`), `goal_metric`,
-`authority` (`propose | pr | merge | deploy`), `ledger` (durable path),
+optional `goal_unit` and `goal_direction` (`up` means a larger `goal_value`
+is better, `down` means a smaller one is), `authority` (`propose | pr | merge | deploy`), `ledger` (durable path),
 `effect_probe`, `finisher`, `progress_budget_seconds`, `stop_rule`,
 `requires` (binaries such as `gh`, `gcloud`). The full `ecosystem.json` roles
 and identities stay optional; add them only when a loop earns autonomy.
@@ -107,7 +127,9 @@ Collectors (dashboards, fleet sync) read state without ticking:
 loop status ~/.hermes/loops/*.json
 # {"loop":"example-watch","manifest":"...","archetype":"maintain",
 #  "last_run":"...","last_outcome":"no_op","last_effect_at":"...",
-#  "effects_7d":0,"fail_streak":0,"stalled":false}
+#  "effects_7d":0,"fail_streak":0,"stalled":false,
+#  "goal_value":12,"goal_value_at":"...","goal_value_7d_ago":18,
+#  "last_reason":"queue empty","waiting_on":null}
 ```
 
 ## Picking an archetype
