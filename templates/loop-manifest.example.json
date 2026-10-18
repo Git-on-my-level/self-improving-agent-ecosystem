@@ -5,6 +5,8 @@
   "host": "docs-ci-runner",
   "archetype": "maintain",
   "goal_metric": "median minutes from red docs CI to green",
+  "goal_unit": "minutes",
+  "goal_direction": "down",
   "authority": "pr",
   "ledger": "~/.hermes/state/loops/docs-ci-watch/receipts.jsonl",
   "effect_probe": "after each merged fix, re-read the workflow's last-run conclusion; put conclusion_before/after in the next receipt's effects",

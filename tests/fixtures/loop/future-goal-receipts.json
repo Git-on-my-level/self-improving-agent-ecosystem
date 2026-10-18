@@ -1,0 +1,20 @@
+[
+  {
+    "offset_seconds": -300,
+    "goal_value": 4,
+    "reason": "queue empty",
+    "waiting_on": "PR review"
+  },
+  {
+    "offset_seconds": 180,
+    "goal_value": 7,
+    "reason": "slightly ahead",
+    "waiting_on": "still valid"
+  },
+  {
+    "offset_seconds": 3600,
+    "goal_value": 999,
+    "reason": "from the future",
+    "waiting_on": "ignore me"
+  }
+]

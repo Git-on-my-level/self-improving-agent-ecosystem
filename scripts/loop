@@ -13,6 +13,14 @@ Those effects, matched on loop+run+ref, drop out of effect counting. The
 historical row is left as written. A successful correction-only row is not a
 health sample, and it does not clear an earlier invalid sample.
 
+Optional on any receipt: "goal_value" (finite number, this tick's measurement
+of the manifest goal_unit; never copied forward), "reason" (string, at most
+200 characters), and "waiting_on" (string, at most 200 characters). A huge
+integer is finite. A receipt dated more than 300s in the future is ignored
+when choosing goal_value, last_reason, and waiting_on. Optional on the
+manifest: "goal_unit" (nonempty string) and "goal_direction" ("up" or
+"down"). `loop validate` rejects a bad receipt field and a bad manifest field.
+
 The runner is the ledger writer. It captures the receipt, appends it to the
 manifest's durable JSONL ledger, and computes stall state. Loops that move a
 metric stall when no `acted`/`measured` receipt with nonempty `effects` lands
@@ -36,7 +44,10 @@ Usage:
     loop tick <manifest> -- <cmd...>   Run one tick of the loop.
     loop tick <manifest>               Use the manifest's own "command".
     loop status <manifest...>          Print one JSON object per loop (JSONL).
-    loop validate <manifest...>        Structural check of manifests.
+    loop validate <manifest-or-receipt...>
+                                       Structural check. A JSON object with
+                                       "outcome" and no schema_version is a
+                                       receipt; anything else is a manifest.
 
 Exit codes (tick): 0 healthy tick (any outcome except infra_error); 6 a
 `requires` binary is missing (nothing ran); 5 infra_error (missing/invalid
@@ -63,6 +74,10 @@ ARCHETYPES = ("optimize", "maintain", "observe_propose")
 AUTHORITIES = ("propose", "pr", "merge", "deploy")
 EFFECT_OUTCOMES = ("acted", "measured")
 HEALTH_OPS = ("eq", "ne", "lt", "lte", "gt", "gte")
+GOAL_DIRECTIONS = ("up", "down")
+NOTE_LIMIT = 200
+# Clock skew allowed before a receipt timestamp counts as future and invalid.
+FUTURE_SKEW_SECONDS = 300
 SCHEMA_VERSION = 1
 EXIT_OK = 0
 EXIT_INFRA = 5
@@ -184,6 +199,14 @@ def load_manifest(path):
         errors.append("command: must be a nonempty list of strings (used by `loop tick <manifest>`)")
     if "retired" in data and not isinstance(data.get("retired"), bool):
         errors.append("retired: must be a boolean")
+    if "goal_unit" in data:
+        unit = data.get("goal_unit")
+        if not isinstance(unit, str) or not unit.strip():
+            errors.append("goal_unit: must be a nonempty string")
+        elif len(unit) > 64:
+            errors.append("goal_unit: must be at most 64 characters")
+    if "goal_direction" in data and data.get("goal_direction") not in GOAL_DIRECTIONS:
+        errors.append("goal_direction: must be up or down")
     return data, errors
 
 
@@ -262,11 +285,69 @@ def validate_receipt(payload):
             ref = item.get("ref")
             if not isinstance(run, str) or not run or not isinstance(ref, str) or not ref:
                 return None, "invalidates_effects entries need string run and string ref"
+    if "goal_value" in receipt and not _is_finite_number(receipt.get("goal_value")):
+        return None, "goal_value must be a finite number"
+    for field in ("reason", "waiting_on"):
+        if field not in receipt:
+            continue
+        value = receipt.get(field)
+        if not isinstance(value, str):
+            return None, f"{field} must be a string"
+        if len(value) > NOTE_LIMIT:
+            return None, f"{field} must be at most {NOTE_LIMIT} characters"
     return receipt, None
 
 
 def has_effects(receipt):
     return receipt.get("outcome") in EFFECT_OUTCOMES and bool(receipt.get("effects"))
+
+
+def goal_fields(rows, now=None):
+    """Goal series and the newest receipt's reason. Absent fields stay null.
+
+    `goal_value` is the latest finite measurement, not a carried-forward copy.
+    `goal_value_7d_ago` is the newest of those whose run is at least 7 days
+    old. `last_reason` and `waiting_on` come from the newest receipt by run
+    time, and are null when that receipt omits them. A run more than
+    `FUTURE_SKEW_SECONDS` ahead of now is not a candidate for any of these.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    newest = None
+    newest_at = None
+    latest_goal = None
+    latest_goal_at = None
+    ago = None
+    ago_at = None
+    cutoff = now - dt.timedelta(days=7)
+    for receipt in rows:
+        at = parse_time(receipt.get("run"))
+        if at is None:
+            continue
+        if (now - at).total_seconds() < -FUTURE_SKEW_SECONDS:
+            continue
+        if newest_at is None or at >= newest_at:
+            newest, newest_at = receipt, at
+        if "goal_value" not in receipt or not _is_finite_number(receipt.get("goal_value")):
+            continue
+        if latest_goal_at is None or at >= latest_goal_at:
+            latest_goal = receipt.get("goal_value")
+            latest_goal_at = at
+        if at <= cutoff and (ago_at is None or at >= ago_at):
+            ago = receipt.get("goal_value")
+            ago_at = at
+    reason = waiting = None
+    if isinstance(newest, dict):
+        if isinstance(newest.get("reason"), str):
+            reason = newest.get("reason")
+        if isinstance(newest.get("waiting_on"), str):
+            waiting = newest.get("waiting_on")
+    return {
+        "goal_value": latest_goal,
+        "goal_value_at": latest_goal_at.isoformat(timespec="seconds") if latest_goal_at else None,
+        "goal_value_7d_ago": ago,
+        "last_reason": reason,
+        "waiting_on": waiting,
+    }
 
 
 def scan_ledger(ledger_path):
@@ -336,15 +417,20 @@ def missing_binaries(names):
 # ---------------------------------------------------------------- stall
 
 
-# Clock skew allowed before a receipt timestamp counts as future and invalid.
-FUTURE_SKEW_SECONDS = 300
-
-
 def _is_finite_number(value):
-    """True for real ints and floats. Bools, null, NaN, and infinities are not."""
+    """True for real ints and floats. Bools, null, NaN, and infinities are not.
+
+    Every Python int is finite. Converting a huge int such as ``10**1000`` to
+    float raises OverflowError, so ints are accepted without that conversion.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return math.isfinite(value)
+    if isinstance(value, int):
+        return True
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _health_compare(op, value, threshold):
@@ -739,6 +825,7 @@ def cmd_status(argv):
             "archetype": manifest["archetype"],
         }
         record.update(state)
+        record.update(goal_fields(rows))
         if is_retired(manifest):
             # History stays visible, but a retired loop is not an action item.
             # healthy is JSON null even when a health SLO would have failed.
@@ -751,12 +838,30 @@ def cmd_status(argv):
     return 1 if failed else 0
 
 
+def _looks_like_receipt(path):
+    """A receipt file is one JSON object with outcome and no manifest schema."""
+    try:
+        data = json.loads(pathlib.Path(os.path.expanduser(str(path))).read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and "outcome" in data and "schema_version" not in data
+
+
 def cmd_validate(argv):
     if not argv:
-        print("usage: loop validate <manifest...>", file=sys.stderr)
+        print("usage: loop validate <manifest-or-receipt...>", file=sys.stderr)
         return EXIT_MANIFEST
     failed = False
     for manifest_path in argv:
+        path = pathlib.Path(os.path.expanduser(str(manifest_path)))
+        if _looks_like_receipt(path):
+            receipt, problem = validate_receipt(path.read_text())
+            if problem or receipt is None:
+                print(f"INVALID {manifest_path}: {problem or 'invalid receipt'}", file=sys.stderr)
+                failed = True
+            else:
+                print(f"ok {manifest_path}")
+            continue
         _, errors = load_manifest(manifest_path)
         if errors:
             for error in errors:

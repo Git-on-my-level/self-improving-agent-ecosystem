@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/loop-manifest.schema.json",
   "title": "Lite loop manifest",
-  "description": "The minimal contract that makes an existing cron loop provable: one archetype, one goal metric, one receipt per tick, a durable ledger, and a progress budget or a health SLO. A receipt may carry invalidates_effects (a list of objects with string run and string ref) so a later row drops those effects from counting, matched on loop+run+ref, without rewriting the historical row. A malformed list makes the receipt invalid. A successful correction-only row is not a health sample. Roles, identities, and the full ecosystem.json planes stay optional.",
+  "description": "The minimal contract that makes an existing cron loop provable: one archetype, one goal metric, one receipt per tick, a durable ledger, and a progress budget or a health SLO. A receipt may carry invalidates_effects (a list of objects with string run and string ref) so a later row drops those effects from counting, matched on loop+run+ref, without rewriting the historical row. A malformed list makes the receipt invalid. A successful correction-only row is not a health sample. A receipt may also carry goal_value (a finite number measured this tick), reason (a string of at most 200 characters), and waiting_on (a string of at most 200 characters). Roles, identities, and the full ecosystem.json planes stay optional.",
   "type": "object",
   "required": ["schema_version", "loop", "host", "archetype", "goal_metric", "authority", "ledger", "progress_budget_seconds", "stop_rule"],
   "additionalProperties": true,
@@ -27,6 +27,16 @@
       "type": "string",
       "minLength": 1,
       "description": "The measurable goal this loop claims to move — not the work it does. Receipt effects must reference it."
+    },
+    "goal_unit": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Unit of receipt goal_value. Examples: banked $/day, free GiB, Firestore reads/day. Optional."
+    },
+    "goal_direction": {
+      "enum": ["up", "down"],
+      "description": "Which way goal_value should move. up means a larger number is better; down means a smaller number is better. Optional."
     },
     "authority": {
       "enum": ["propose", "pr", "merge", "deploy"],
