@@ -15,8 +15,10 @@ health sample, and it does not clear an earlier invalid sample.
 
 Optional on any receipt: "goal_value" (finite number, this tick's measurement
 of the manifest goal_unit; never copied forward), "reason" (string, at most
-200 characters), and "waiting_on" (string, at most 200 characters). Optional
-on the manifest: "goal_unit" (nonempty string) and "goal_direction" ("up" or
+200 characters), and "waiting_on" (string, at most 200 characters). A huge
+integer is finite. A receipt dated more than 300s in the future is ignored
+when choosing goal_value, last_reason, and waiting_on. Optional on the
+manifest: "goal_unit" (nonempty string) and "goal_direction" ("up" or
 "down"). `loop validate` rejects a bad receipt field and a bad manifest field.
 
 The runner is the ledger writer. It captures the receipt, appends it to the
@@ -74,6 +76,8 @@ EFFECT_OUTCOMES = ("acted", "measured")
 HEALTH_OPS = ("eq", "ne", "lt", "lte", "gt", "gte")
 GOAL_DIRECTIONS = ("up", "down")
 NOTE_LIMIT = 200
+# Clock skew allowed before a receipt timestamp counts as future and invalid.
+FUTURE_SKEW_SECONDS = 300
 SCHEMA_VERSION = 1
 EXIT_OK = 0
 EXIT_INFRA = 5
@@ -304,7 +308,8 @@ def goal_fields(rows, now=None):
     `goal_value` is the latest finite measurement, not a carried-forward copy.
     `goal_value_7d_ago` is the newest of those whose run is at least 7 days
     old. `last_reason` and `waiting_on` come from the newest receipt by run
-    time, and are null when that receipt omits them.
+    time, and are null when that receipt omits them. A run more than
+    `FUTURE_SKEW_SECONDS` ahead of now is not a candidate for any of these.
     """
     now = now or dt.datetime.now(dt.timezone.utc)
     newest = None
@@ -317,6 +322,8 @@ def goal_fields(rows, now=None):
     for receipt in rows:
         at = parse_time(receipt.get("run"))
         if at is None:
+            continue
+        if (now - at).total_seconds() < -FUTURE_SKEW_SECONDS:
             continue
         if newest_at is None or at >= newest_at:
             newest, newest_at = receipt, at
@@ -410,15 +417,20 @@ def missing_binaries(names):
 # ---------------------------------------------------------------- stall
 
 
-# Clock skew allowed before a receipt timestamp counts as future and invalid.
-FUTURE_SKEW_SECONDS = 300
-
-
 def _is_finite_number(value):
-    """True for real ints and floats. Bools, null, NaN, and infinities are not."""
+    """True for real ints and floats. Bools, null, NaN, and infinities are not.
+
+    Every Python int is finite. Converting a huge int such as ``10**1000`` to
+    float raises OverflowError, so ints are accepted without that conversion.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return math.isfinite(value)
+    if isinstance(value, int):
+        return True
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _health_compare(op, value, threshold):

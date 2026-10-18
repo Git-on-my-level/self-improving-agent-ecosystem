@@ -41,11 +41,13 @@ Every loop proves its effect with three things:
      blocking the loop, such as `anx ask event:ev_...` or a pull-request URL.
 
    `loop validate` on a receipt file rejects a non-numeric `goal_value` and
-   an over-long `reason` or `waiting_on`. `loop status` reports `goal_value`
-   and `goal_value_at` from the latest receipt that carried one,
+   an over-long `reason` or `waiting_on`. An integer goal, including a very
+   large one, is finite. `loop status` reports `goal_value` and
+   `goal_value_at` from the latest receipt that carried one,
    `goal_value_7d_ago` (the newest such value at least 7 days old, otherwise
    null), and `last_reason` plus `waiting_on` from the newest receipt (null
-   when that receipt omits them).
+   when that receipt omits them). A receipt dated more than 300 seconds in
+   the future is left out of all three, the same bound the health SLO uses.
 
    Optional on any receipt: `"invalidates_effects":[{"run":"<iso8601>","ref":"<url>"}]`.
    Each entry is an object with a string `run` and a string `ref`. A null

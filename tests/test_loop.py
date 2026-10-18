@@ -1246,6 +1246,53 @@ class GoalFieldTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("ok", proc.stdout)
 
+    def test_huge_integer_goal_does_not_crash(self):
+        fixture = pathlib.Path(__file__).resolve().parent / "fixtures" / "loop" / "huge-goal-receipt.json"
+        huge = json.loads(fixture.read_text(encoding="utf-8"))["goal_value"]
+        self.assertEqual(huge, 10 ** 1000)
+        self.assertTrue(loop._is_finite_number(huge))
+        self.assertFalse(loop._is_finite_number(float("inf")))
+        self.assertFalse(loop._is_finite_number(float("nan")))
+        parsed, problem = loop.validate_receipt(fixture.read_text(encoding="utf-8"))
+        self.assertIsNone(problem)
+        self.assertEqual(parsed["goal_value"], huge)
+        proc = run_loop("validate", str(fixture))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("ok", proc.stdout)
+
+    def test_future_receipt_is_left_out_of_goal_status(self):
+        fixture = pathlib.Path(__file__).resolve().parent / "fixtures" / "loop" / "future-goal-receipts.json"
+        spec = json.loads(fixture.read_text(encoding="utf-8"))
+        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        rows = []
+        for item in spec:
+            at = (now + dt.timedelta(seconds=item["offset_seconds"])).isoformat(timespec="seconds")
+            rows.append(receipt(
+                run=at, outcome="no_op", goal_value=item["goal_value"],
+                reason=item["reason"], waiting_on=item["waiting_on"],
+            ))
+        self._write(rows)
+        fields = loop.goal_fields(loop.read_ledger(self.ledger)[0], now)
+        self.assertEqual(fields["goal_value"], 7)
+        self.assertEqual(fields["last_reason"], "slightly ahead")
+        self.assertEqual(fields["waiting_on"], "still valid")
+        manifest = write_manifest(self.dir, ledger=str(self.ledger))
+        proc = run_loop("status", str(manifest))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        record = json.loads(proc.stdout.strip().splitlines()[0])
+        self.assertEqual(record["goal_value"], 7)
+        self.assertEqual(record["last_reason"], "slightly ahead")
+        self.assertEqual(record["waiting_on"], "still valid")
+        self.assertNotEqual(record["goal_value"], 999)
+        only_future = [receipt(
+            run=(now + dt.timedelta(seconds=3600)).isoformat(timespec="seconds"),
+            outcome="measured", goal_value=10 ** 1000, reason="from the future", waiting_on="ignore me",
+        )]
+        fields = loop.goal_fields(only_future, now)
+        self.assertIsNone(fields["goal_value"])
+        self.assertIsNone(fields["last_reason"])
+        self.assertIsNone(fields["waiting_on"])
+
     def test_validate_rejects_bad_goal_direction(self):
         proc = run_loop("validate", str(write_manifest(self.dir, goal_direction="sideways")))
         self.assertEqual(proc.returncode, 1)
