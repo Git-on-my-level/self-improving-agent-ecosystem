@@ -37,6 +37,7 @@ DECISIONS = ("kept", "reverted", "rejected")
 # outcome, experiment decision or None. Intermediate types live separately.
 EVENT_OUTCOMES: dict[str, tuple[str, str | None]] = {
     "observation_recorded": ("measured", None),
+    "pack_intake_recorded": ("measured", None),
     "observer_failed": ("infra_error", None),
     "no_action": ("no_op", None),
     "candidate_rejected": ("measured", "rejected"),

@@ -75,6 +75,7 @@ The reference architecture has four deliberately separate planes:
 - [Authority and security](docs/authority.md)
 - [Adoption guide](docs/adoption-guide.md)
 - [Lite adoption: make an existing loop provable](docs/adoption-lite.md)
+- [Grafts: importing outside practices as evidence](docs/grafts.md)
 - [Failure patterns](docs/failure-patterns.md)
 - [AVO-lite integration](docs/avo-lite.md)
 - [ANX receipts](docs/anx.md) — optional publisher from a loop ledger to Agent Nexus
@@ -146,8 +147,9 @@ docs/       Human architecture and operating guides
 schemas/    JSON Schemas for manifests, policy, and events
 templates/  Copyable ecosystem skeleton
 examples/   Small evaluator and verifier examples
-scripts/    Zero-dependency installer, scaffold, validator, progress check, AVO event bridge, and ANX receipt publisher
+scripts/    Zero-dependency installer, scaffold, validator, progress check, AVO event bridge, graft intake, and ANX receipt publisher
 skills/     Portable agent skill and focused references
+packs/      Known graft-pack index (listing is directory assistance, not validation)
 tests/      Contract tests and reward-hacking regression fixtures
 ```
 

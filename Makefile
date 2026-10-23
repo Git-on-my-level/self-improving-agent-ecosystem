@@ -13,5 +13,6 @@ test:
 shellcheck:
 	sh -n scripts/install-avo-lite.sh
 	sh -n scripts/init-ecosystem.sh
+	sh -n scripts/install-graft.sh
 	find templates/stubs -type f -name '*.sh' -exec sh -n {} \;
 	@if command -v shellcheck >/dev/null 2>&1; then shellcheck scripts/*.sh templates/stubs/*/*.sh; fi

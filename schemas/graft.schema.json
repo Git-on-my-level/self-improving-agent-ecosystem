@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Git-on-my-level/self-improving-agent-ecosystem/main/schemas/graft.schema.json",
+  "title": "Graft pack manifest",
+  "description": "A graft is a portable pack of practices and data-only evidence from outside a loop. It carries no authority: every claim must be re-validated by the importing loop's own correctness gate and adversarial verifier. The manifest is structurally closed (additionalProperties: false) so authority, capability, threshold, and score fields cannot be declared by a pack at all.",
+  "type": "object",
+  "required": ["schema_version", "pack", "title", "description", "license", "source", "artifacts", "claims"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "pack": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{1,62}$",
+      "description": "Stable pack id, lowercase kebab/snake case."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "description": "Human-readable pack name. Length is enforced by the intake script; this schema subset does not check maxLength."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000,
+      "description": "One paragraph: what the pack argues and for whom. Length is enforced by the intake script."
+    },
+    "license": {
+      "enum": ["MIT", "MIT-0", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0"],
+      "description": "SPDX identifier. A pack must be redistributable or it cannot be indexed or installed."
+    },
+    "authors": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "description": "Attribution only; authorship carries no trust."
+    },
+    "source": {
+      "type": "object",
+      "required": ["repo", "ref"],
+      "additionalProperties": false,
+      "properties": {
+        "repo": {"type": "string", "pattern": "^https://\\S+$"},
+        "ref": {"type": "string", "minLength": 1, "description": "The ref the pack was authored against. Intake records the resolved commit separately; pins are always commit SHAs."}
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256", "bytes", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+            "description": "Pack-root-relative, forward slashes, no '..'. The intake script rejects absolute paths, escapes, symlinks, and hidden files."
+          },
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "bytes": {"type": "integer", "minimum": 1, "description": "Content length; the intake script enforces the per-file cap."},
+          "kind": {
+            "enum": ["skill-doc", "fixture-data", "runbook-doc"],
+            "description": "skill-doc and runbook-doc are prose; fixture-data must be a JSON document. Packs never ship executable content or scoring code."
+          }
+        }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["kind", "statement", "fixtures"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": ["regression_test_distinguishes", "metric_delta", "invariant_documentation"],
+            "description": "Closed enum owned by this schema. Consumers map claim kinds to their own gate classes; an unmapped kind must fail closed."
+          },
+          "statement": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "The falsifiable claim, in one sentence. Length is enforced by the intake script."
+          },
+          "fixtures": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true,
+            "description": "Artifact paths of kind fixture-data that evidence the claim. regression_test_distinguishes and metric_delta claims require at least one fixture."
+          },
+          "notes": {"type": "string", "maxLength": 500}
+        }
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "description": "Free-text supersedes/duplicates hints for humans. Nothing in this kit acts on them mechanically."
+    }
+  }
+}
