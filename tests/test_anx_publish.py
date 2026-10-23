@@ -24,6 +24,7 @@ SCHEMA = ROOT / "schemas" / "event.schema.json"
 
 EXPECTED_EVENTS = {
     "observation_recorded": ("measured", None),
+    "pack_intake_recorded": ("measured", None),
     "observer_failed": ("infra_error", None),
     "no_action": ("no_op", None),
     "candidate_rejected": ("measured", "rejected"),

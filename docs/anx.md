@@ -100,6 +100,7 @@ budget are infrastructure errors.
 | Event | Outcome | Decision |
 | --- | --- | --- |
 | `observation_recorded` | measured | — |
+| `pack_intake_recorded` | measured | — |
 | `observer_failed` | infra_error | — |
 | `no_action` | no_op | — |
 | `candidate_started` | skipped | intermediate |

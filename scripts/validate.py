@@ -25,6 +25,7 @@ EVENT_TYPES = {
     "candidate_quarantined", "rollback_started", "rollback_completed",
     "loop_stalled", "loop_resumed", "budget_exhausted", "deadman_missed",
     "state_repaired", "human_decision_recorded", "autonomy_changed",
+    "pack_intake_recorded",
 }
 CANDIDATE_EVENTS = {
     name for name in EVENT_TYPES
@@ -33,7 +34,7 @@ CANDIDATE_EVENTS = {
         "approval_granted", "promotion_started", "promotion_reconciled",
         "promotion_failed", "artifact_promoted", "deployment_observed",
         "outcome_evaluated", "regression_detected", "rollback_started",
-        "rollback_completed",
+        "rollback_completed", "pack_intake_recorded",
     }
 }
 
